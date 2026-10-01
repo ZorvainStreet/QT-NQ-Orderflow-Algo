@@ -1,3 +1,4 @@
 <Solution>
   <Project Path="QT MNQ Orderflow Algo.csproj" />
+  <Project Path="tests/NQOrderFlow.Tests/NQOrderFlow.Tests.csproj" />
 </Solution>

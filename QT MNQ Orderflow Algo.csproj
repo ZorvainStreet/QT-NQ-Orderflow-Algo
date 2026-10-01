@@ -10,7 +10,9 @@
     <RootNamespace>QT_MNQ_Orderflow_Algo</RootNamespace>
     <StartAction>Program</StartAction>
     <StartProgram>C:\Quantower\TradingPlatform\v1.146.18\Console.StarterNew.exe</StartProgram>
-    <StartArguments>--address 127.0.0.1 --port 57485</StartArguments>
+    <StartArguments>--address 127.0.0.1 --port 63638</StartArguments>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|AnyCPU'">
     <OutputPath>C:\Quantower\TradingPlatform\v1.146.18\..\..\Settings\Scripts\Strategies\QT MNQ Orderflow Algo</OutputPath>
@@ -18,6 +20,10 @@
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|AnyCPU'">
     <OutputPath>C:\Quantower\TradingPlatform\v1.146.18\..\..\Settings\Scripts\Strategies\QT MNQ Orderflow Algo</OutputPath>
   </PropertyGroup>
+  <ItemGroup>
+    <Compile Remove="tests/**" />
+    <None Remove="tests/**" />
+  </ItemGroup>
   <ItemGroup>
     <Reference Include="TradingPlatform.BusinessLayer">
       <HintPath>C:\Quantower\TradingPlatform\v1.146.18\bin\TradingPlatform.BusinessLayer.dll</HintPath>

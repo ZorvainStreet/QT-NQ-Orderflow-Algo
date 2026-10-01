@@ -19,5 +19,6 @@ Release build lands in `C:\Quantower\Settings\Scripts\Strategies\QT MNQ Orderflo
 - [ ] Stop/start keeps `state.json` (Documents/NQ_OrderFlow/state.json by default).
 - [ ] Corrupting `state.json` and restarting shows `manual=True` (Manual re-enable = 1) and the SAFE MODE reason in the log.
 - [ ] The log shows the IST window table.
+- [ ] Tick age stays < ~2 s on a live feed, and the first-tick log line shows `Last.Time` Kind (expect Utc).
 - [ ] An invalid HH:mm input (e.g. `9:5x`) logs the field name and stops.
 - [ ] Confirm how gauge names/values render in the metrics panel (new `OnInitializeMetrics` API).

@@ -11,6 +11,7 @@ namespace QT_MNQ_Orderflow_Algo;
 public sealed class NQOrderFlowStrategy : Strategy
 {
     private const int TimerPeriodMs = 1000;
+    private const int TimerDisposeWaitMs = 5000;
     private const string HhMm = @"hh\:mm";
 
     [InputParameter("Symbol", 10)] public Symbol? symbol;
@@ -21,9 +22,11 @@ public sealed class NQOrderFlowStrategy : Strategy
     [InputParameter("MLL distance USD", 110)] public double MllDistanceUsd = 1000;
     [InputParameter("MLL lock floor USD (VERIFY)", 120)] public double MllLockFloorUsd = 25000; // VERIFY
     [InputParameter("Profit target USD", 130)] public double ProfitTargetUsd = 1250;
+    [InputParameter("Target buffer USD", 135)] public double TargetBufferUsd = 25;
     [InputParameter("Consistency cap %", 140)] public double ConsistencyCapPercent = 50;
     [InputParameter("Consistency early stop %", 145)] public double ConsistencyEarlyStopPercent = 45;
     [InputParameter("Max contracts allowed (VERIFY)", 150, 1, 10, 1, 0)] public int MaxContractsAllowed = 1; // VERIFY
+    [InputParameter("Min trading days", 155, 1, 30, 1, 0)] public int MinTradingDays = 2;
 
     [InputParameter("NY AM start ET", 200)] public string NyAmStart = "09:35";
     [InputParameter("NY AM end ET", 210)] public string NyAmEnd = "11:45";
@@ -34,24 +37,37 @@ public sealed class NQOrderFlowStrategy : Strategy
     [InputParameter("London start ET", 252)] public string LondonStart = "03:00";
     [InputParameter("London end ET", 254)] public string LondonEnd = "05:00";
     [InputParameter("Flatten time ET", 260)] public string FlattenTimeEt = "15:55";
+    [InputParameter("Lucid deadline ET", 262)] public string LucidDeadlineEt = "16:45";
+    [InputParameter("Trading day roll ET", 264)] public string TradingDayRollEt = "18:00";
     [InputParameter("News CSV path", 270)] public string NewsCsvPath = "";
     [InputParameter("News block before (min)", 272, 0, 60, 1, 0)] public int NewsBeforeMin = 2;
     [InputParameter("News block after (min)", 274, 0, 60, 1, 0)] public int NewsAfterMin = 3;
 
+    [InputParameter("Tier A min headroom USD", 290)] public double TierAMinHeadroom = 900;
+    [InputParameter("Tier B min headroom USD", 295)] public double TierBMinHeadroom = 600;
     [InputParameter("Max risk tier A USD", 300)] public double MaxRiskTierA = 250;
     [InputParameter("Max risk tier B USD", 305)] public double MaxRiskTierB = 200;
     [InputParameter("Max risk tier C USD", 310)] public double MaxRiskTierC = 150;
+    [InputParameter("Max stop points tier C", 311)] public double MaxStopPointsTierC = 7.5;
+    [InputParameter("Score add tier B", 312, 0, 50, 1, 0)] public int ScoreAddTierB = 5;
+    [InputParameter("Score add tier C", 313, 0, 50, 1, 0)] public int ScoreAddTierC = 10;
+    [InputParameter("Max risk % of headroom", 314)] public double MaxRiskPercentOfHeadroom = 25;
     [InputParameter("Halt headroom USD", 315)] public double HaltHeadroomUsd = 350;
     [InputParameter("Max daily loss USD", 320)] public double MaxDailyLossUsd = 350;
     [InputParameter("Max consecutive losses", 325, 1, 10, 1, 0)] public int MaxConsecutiveLosses = 2;
+    [InputParameter("Streak pause (min)", 327, 0, 240, 1, 0)] public int StreakPauseMinutes = 30;
     [InputParameter("Max trades/day", 330, 1, 20, 1, 0)] public int MaxTradesPerDay = 4;
     [InputParameter("Daily profit cap USD", 335)] public double DailyProfitCapUsd = 450;
+    [InputParameter("Giveback arm USD", 338)] public double GivebackArmUsd = 200;
     [InputParameter("Giveback %", 340)] public double GivebackPercent = 40;
     [InputParameter("Loss cooldown (min)", 345, 0, 120, 1, 0)] public int LossCooldownMinutes = 10;
     [InputParameter("Win cooldown (min)", 350, 0, 120, 1, 0)] public int WinCooldownMinutes = 3;
     [InputParameter("Commission per side USD (VERIFY)", 355)] public double CommissionPerSideUsd = 2.5; // VERIFY
+    [InputParameter("Slippage USD", 357)] public double SlippageUsd = 5;
+    [InputParameter("Microscalp hold (s)", 358, 0, 60, 1, 0)] public int MicroscalpHoldSeconds = 5;
     [InputParameter("Microscalp warn %", 360)] public double MicroscalpWarnPercent = 20;
     [InputParameter("Microscalp halt %", 365)] public double MicroscalpHaltPercent = 35;
+    [InputParameter("Safe-mode exception count", 370, 1, 100, 1, 0)] public int SafeModeExceptionCount = 5;
 
     [InputParameter("State path (blank = Documents/NQ_OrderFlow/state.json)", 900)] public string StatePath = "";
     [InputParameter("EMERGENCY FLATTEN", 999)] public bool EmergencyFlatten = false;
@@ -66,6 +82,9 @@ public sealed class NQOrderFlowStrategy : Strategy
     private string? _lastStatusLine;
     private bool _emergencyLogged;
     private bool _stateLoadFailed;
+    private volatile bool _stopping;
+    private int _timerBusy;
+    private int _tickKindLogged;
 
     public override string[] MonitoringConnectionsIds => new[] { symbol?.ConnectionId ?? "" };
 
@@ -76,6 +95,28 @@ public sealed class NQOrderFlowStrategy : Strategy
     }
 
     protected override void OnRun()
+    {
+        _guard = null;
+        _store = null;
+        _clock = null;
+        _stateLoadFailed = false;
+        _stopping = false;
+        _lastStatusLine = null;
+        Interlocked.Exchange(ref _lastTickUtcTicks, 0);
+        Interlocked.Exchange(ref _tickKindLogged, 0);
+        try
+        {
+            RunCore();
+        }
+        catch (Exception ex)
+        {
+            Log($"OnRun failed: {ex}", StrategyLoggingLevel.Error);
+            _guard?.HaltSafeMode($"OnRun exception: {ex.Message}");
+            Stop();
+        }
+    }
+
+    private void RunCore()
     {
         if (symbol is null || account is null || symbol.ConnectionId != account.ConnectionId)
         {
@@ -113,6 +154,7 @@ public sealed class NQOrderFlowStrategy : Strategy
         _guard = LucidRiskGuard.ForFlexEvaluation(BuildAccountRules(), _risk, _clock, news, log, loaded.State?.Eval, loaded.State?.Day);
         _stateLoadFailed = loaded.Error is not null;
         if (loaded.Error is not null) _guard.HaltSafeMode(loaded.Error);
+        _guard.EnsureTradingDay(NowUtc());
 
         LogWindowsInIst(log);
         symbol.NewLast += OnNewLast;
@@ -122,8 +164,13 @@ public sealed class NQOrderFlowStrategy : Strategy
 
     protected override void OnStop()
     {
-        _timer?.Dispose();
-        _timer = null;
+        _stopping = true;
+        var timer = Interlocked.Exchange(ref _timer, null);
+        if (timer is not null)
+        {
+            using var done = new ManualResetEvent(false);
+            if (timer.Dispose(done)) done.WaitOne(TimerDisposeWaitMs); // wait for an in-flight callback
+        }
         if (symbol is not null) symbol.NewLast -= OnNewLast;
         SaveState();
     }
@@ -189,20 +236,39 @@ public sealed class NQOrderFlowStrategy : Strategy
         return ticks == 0 ? null : (decimal)(NowUtc() - new DateTime(ticks, DateTimeKind.Utc)).TotalSeconds;
     }
 
-    private void OnNewLast(Symbol s, Last last) => Guarded(() => Interlocked.Exchange(ref _lastTickUtcTicks, last.Time.Ticks));
+    private void OnNewLast(Symbol s, Last last) => Guarded(() =>
+    {
+        if (Interlocked.Exchange(ref _tickKindLogged, 1) == 0)
+            Log($"First tick: Last.Time={last.Time:O} Kind={last.Time.Kind} (tick age assumes UTC)", StrategyLoggingLevel.Info);
+        Interlocked.Exchange(ref _lastTickUtcTicks, last.Time.Ticks);
+    });
 
-    private void OnTimer() => Guarded(() =>
+    private void OnTimer()
+    {
+        if (_stopping || Interlocked.Exchange(ref _timerBusy, 1) == 1) return; // stopped, or previous tick still running
+        try
+        {
+            if (!_stopping) Guarded(TimerTick);
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _timerBusy, 0);
+        }
+    }
+
+    private void TimerTick()
     {
         var now = NowUtc();
+        _guard!.EnsureTradingDay(now);
         if (EmergencyFlatten && !_emergencyLogged)
         {
             Log("EmergencyFlatten is set; Phase 1 holds no positions (Phase 5 wires the flatten)", StrategyLoggingLevel.Trading);
             _emergencyLogged = true;
         }
         if (!EmergencyFlatten) _emergencyLogged = false;
-        if (_guard!.ShouldFlattenNow(now)) { /* Phase 5: ExecutionEngine.FlattenAll() */ }
+        if (_guard.ShouldFlattenNow(now)) { /* Phase 5: ExecutionEngine.FlattenAll() */ }
         LogStatusIfChanged(now);
-    });
+    }
 
     /// <summary>Text-valued status (formerly OnGetMetrics strings) logged whenever it changes.</summary>
     private void LogStatusIfChanged(DateTime now)
@@ -244,8 +310,14 @@ public sealed class NQOrderFlowStrategy : Strategy
                 Log("State not saved: load failed this run; fix or remove the state file to re-enable (fail closed)", StrategyLoggingLevel.Error);
                 return;
             }
-            if (_guard is not null)
-                _store?.Save(new PersistedState(PersistedState.CurrentSchemaVersion, _guard.Eval, _guard.Day, null));
+            if (_guard is null || _store is null) return;
+            if (_guard.Day.Date == default)
+            {
+                // Mirrors StateStore.Validate ("missing Day.Date"): never write a file the next load would reject.
+                Log("State not saved: trading day was never rolled (Day.Date unset)", StrategyLoggingLevel.Error);
+                return;
+            }
+            _store.Save(new PersistedState(PersistedState.CurrentSchemaVersion, _guard.Eval, _guard.Day, null));
         }
         catch (Exception ex)
         {
@@ -264,7 +336,8 @@ public sealed class NQOrderFlowStrategy : Strategy
         {
             (nameof(NyAmStart), NyAmStart), (nameof(NyAmEnd), NyAmEnd), (nameof(NyPmStart), NyPmStart),
             (nameof(NyPmEnd), NyPmEnd), (nameof(LondonStart), LondonStart), (nameof(LondonEnd), LondonEnd),
-            (nameof(FlattenTimeEt), FlattenTimeEt),
+            (nameof(FlattenTimeEt), FlattenTimeEt), (nameof(LucidDeadlineEt), LucidDeadlineEt),
+            (nameof(TradingDayRollEt), TradingDayRollEt),
         };
         var parsed = new Dictionary<string, TimeSpan>();
         foreach (var (name, value) in fields)
@@ -281,6 +354,8 @@ public sealed class NQOrderFlowStrategy : Strategy
                 new SessionWindow("LONDON_OPEN", parsed[nameof(LondonStart)], parsed[nameof(LondonEnd)], LondonEnabled, 0),
             },
             FlattenTimeEt = parsed[nameof(FlattenTimeEt)],
+            LucidDeadlineEt = parsed[nameof(LucidDeadlineEt)],
+            TradingDayRollEt = parsed[nameof(TradingDayRollEt)],
             NewsBeforeMin = NewsBeforeMin,
             NewsAfterMin = NewsAfterMin,
         };
@@ -297,6 +372,8 @@ public sealed class NQOrderFlowStrategy : Strategy
         ConsistencyCapPercent = (decimal)ConsistencyCapPercent,
         ConsistencyEarlyStopPercent = (decimal)ConsistencyEarlyStopPercent,
         MaxContractsAllowed = MaxContractsAllowed,
+        TargetBufferUsd = (decimal)TargetBufferUsd,
+        MinTradingDays = MinTradingDays,
     };
 
     private RiskSettings BuildRiskSettings() => new()
@@ -315,6 +392,17 @@ public sealed class NQOrderFlowStrategy : Strategy
         CommissionPerSideUsd = (decimal)CommissionPerSideUsd,
         MicroscalpWarnPercent = (decimal)MicroscalpWarnPercent,
         MicroscalpHaltPercent = (decimal)MicroscalpHaltPercent,
+        TierAMinHeadroom = (decimal)TierAMinHeadroom,
+        TierBMinHeadroom = (decimal)TierBMinHeadroom,
+        MaxStopPointsTierC = (decimal)MaxStopPointsTierC,
+        ScoreAddTierB = ScoreAddTierB,
+        ScoreAddTierC = ScoreAddTierC,
+        MaxRiskPercentOfHeadroom = (decimal)MaxRiskPercentOfHeadroom,
+        SlippageUsd = (decimal)SlippageUsd,
+        StreakPauseMinutes = StreakPauseMinutes,
+        GivebackArmUsd = (decimal)GivebackArmUsd,
+        MicroscalpHoldSeconds = MicroscalpHoldSeconds,
+        SafeModeExceptionCount = SafeModeExceptionCount,
     };
 
     private void LogWindowsInIst(ILogSink log)

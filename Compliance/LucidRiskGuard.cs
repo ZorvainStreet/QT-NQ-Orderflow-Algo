@@ -40,6 +40,9 @@ public sealed class LucidRiskGuard
     public bool DailyHaltActive { get { lock (_gate) return _day.HaltReason is not null; } }
     public bool ManualReenableRequired { get { lock (_gate) return _eval.TargetReached || _safeModeReason is not null; } }
 
+    /// <summary>Rolls the daily state to the current trading date. Call at startup and on each timer tick.</summary>
+    public void EnsureTradingDay(DateTime nowUtc) { lock (_gate) RollDay(nowUtc); }
+
     public RiskTier TierFor(decimal equity) { lock (_gate) return _gov.TierFor(_eval.Headroom(equity)); }
 
     public void HaltSafeMode(string reason)

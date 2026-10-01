@@ -49,7 +49,8 @@ public sealed class LucidRiskGuard
 
     public bool ShouldFlattenNow(DateTime utc)
     {
-        lock (_gate) return _clock.IsPastFlatten(utc) || _eval.Breached || _safeModeReason is not null;
+        lock (_gate) return _clock.IsPastFlatten(utc) || _eval.Breached || _eval.TargetReached
+                || _day.HaltReason is not null || _safeModeReason is not null;
     }
 
     public GuardDecision CanEnter(EntryRequest q, GuardContext ctx)
@@ -68,9 +69,19 @@ public sealed class LucidRiskGuard
     {
         lock (_gate)
         {
-            RollDay(closeUtc);
-            _day = _day.WithTradeClosed(pnl, closeUtc, _r);
-            _eval = _eval.WithTradeClosed(_day.Date, pnl, holdSeconds, _r, _a);
+            var td = _clock.TradingDate(closeUtc);
+            if (td < _day.Date)
+            {
+                // Late close from an earlier trading date: book to the evaluation only, never touch today's state.
+                _eval = _eval.WithTradeClosed(td, pnl, holdSeconds, _r, _a);
+                _log.Trading($"LATE CLOSE for {td} booked to eval only: {pnl:F2}");
+            }
+            else
+            {
+                RollDay(closeUtc);
+                _day = _day.WithTradeClosed(pnl, closeUtc, _r);
+                _eval = _eval.WithTradeClosed(_day.Date, pnl, holdSeconds, _r, _a);
+            }
             if (_eval.MicroscalpPercent >= _r.MicroscalpWarnPercent) _log.Trading($"WARN microscalp share {_eval.MicroscalpPercent:F1}%");
             if (_day.HaltReason is not null) _log.Trading($"DAY HALT: {_day.HaltReason}");
             if (_eval.TargetReached) _log.Trading("TARGET REACHED: trading stopped, manual re-enable required");
@@ -112,6 +123,6 @@ public sealed class LucidRiskGuard
     private void RollDay(DateTime utc)
     {
         var td = _clock.TradingDate(utc);
-        if (td != _day.Date) _day = DailyRiskState.New(td);
+        if (td > _day.Date) _day = DailyRiskState.New(td);
     }
 }

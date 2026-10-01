@@ -72,4 +72,43 @@ public sealed class LucidRiskGuardTests
     [Fact]
     public void ShouldFlatten_At1555Et()
         => Assert.True(Guard().ShouldFlattenNow(new DateTime(2026, 10, 29, 19, 55, 0, DateTimeKind.Utc)));
+
+    [Fact]
+    public void LateClose_FromEarlierDate_DoesNotResetToday_AndBooksToEval()
+    {
+        var g = Guard();
+        g.OnTradeClosed(ThuAm, -360m, 60);
+        Assert.True(g.DailyHaltActive);
+        g.OnTradeClosed(Day(28), 50m, 60);
+        Assert.True(g.DailyHaltActive);
+        Assert.True(g.Eval.DailyPnl.ContainsKey(new DateOnly(2026, 10, 28)));
+    }
+
+    [Fact]
+    public void CanEnter_WithEarlierTime_DoesNotResetDay()
+    {
+        var g = Guard();
+        g.OnTradeClosed(ThuAm, -360m, 60);
+        Assert.True(g.DailyHaltActive);
+        g.CanEnter(Req(Day(28)), Flat with { Equity = 24640m });
+        Assert.True(g.DailyHaltActive);
+    }
+
+    [Fact]
+    public void ShouldFlatten_WhenDayHalted()
+    {
+        var g = Guard();
+        g.OnTradeClosed(ThuAm, -360m, 60);
+        Assert.True(g.ShouldFlattenNow(ThuAm));
+    }
+
+    [Fact]
+    public void ShouldFlatten_WhenTargetReached()
+    {
+        var g = Guard();
+        g.OnTradeClosed(Day(26), 445m, 60);
+        g.OnTradeClosed(Day(27), 445m, 60);
+        g.OnTradeClosed(Day(28), 400m, 60);
+        Assert.True(g.ShouldFlattenNow(ThuAm));
+    }
 }

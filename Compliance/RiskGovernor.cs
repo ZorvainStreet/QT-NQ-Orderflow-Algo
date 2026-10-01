@@ -35,6 +35,8 @@ public sealed class RiskGovernor
     public RiskCheck CheckTrade(decimal stopPoints, decimal pointValue, decimal headroomUsd)
     {
         var tier = TierFor(headroomUsd);
+        if (stopPoints <= 0m || pointValue <= 0m)
+            return new(false, 0m, tier, $"Invalid trade: stopPoints ({stopPoints}) and pointValue ({pointValue}) must be > 0");
         var risk = stopPoints * pointValue + 2 * _s.CommissionPerSideUsd + _s.SlippageUsd;
         if (tier == RiskTier.Halt)
             return new(false, risk, tier, $"Tier HALT: headroom {headroomUsd:F0} < {_s.HaltHeadroomUsd:F0}");

@@ -44,4 +44,47 @@ public sealed class RiskGovernorTests
     [Fact]
     public void Halt_RejectsEverything()
         => Assert.False(_g.CheckTrade(1m, 2m, 300m).Ok);
+
+    [Theory]
+    [InlineData(0, 20)] [InlineData(-1, 20)] [InlineData(5, 0)] [InlineData(5, -2)]
+    public void NonPositiveStopOrPointValue_IsRejectedFirst(double stop, double pointValue)
+    {
+        var r = _g.CheckTrade((decimal)stop, (decimal)pointValue, 1000m);
+        Assert.False(r.Ok);
+        Assert.Contains("must be > 0", r.Reason);
+    }
+
+    [Fact]
+    public void NonPositiveStop_IsRejectedEvenWhenHalt()
+    {
+        var r = _g.CheckTrade(0m, 20m, 100m);
+        Assert.False(r.Ok);
+        Assert.Contains("must be > 0", r.Reason);
+    }
+
+    [Fact]
+    public void TierB_RejectsAboveCap()
+    {
+        // headroom 800 -> B, cap 200, 25% of 800 = 200. risk = 10*20+7.5 = 207.5 > 200
+        var r = _g.CheckTrade(10m, 20m, 800m);
+        Assert.False(r.Ok);
+        Assert.Equal(RiskTier.B, r.Tier);
+        Assert.Contains("tier B cap", r.Reason);
+    }
+
+    [Fact]
+    public void TierC_RejectsAboveCap()
+    {
+        // headroom 590 -> C, stop 7 <= 7.5, pointValue 20 -> risk 147.5 <= 150 ok; stop 7.4 -> 155.5 > 150
+        var r = _g.CheckTrade(7.4m, 20m, 590m);
+        Assert.False(r.Ok);
+        Assert.Equal(RiskTier.C, r.Tier);
+        Assert.Contains("tier C cap", r.Reason);
+    }
+
+    [Theory]
+    [InlineData(RiskTier.A, 0)] [InlineData(RiskTier.B, 5)]
+    [InlineData(RiskTier.C, 10)] [InlineData(RiskTier.Halt, 0)]
+    public void ScoreThresholdAdd_PerTier(RiskTier tier, int expected)
+        => Assert.Equal(expected, _g.ScoreThresholdAdd(tier));
 }

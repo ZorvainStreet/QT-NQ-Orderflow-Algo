@@ -45,4 +45,31 @@ public sealed class StateStoreTests
         Assert.False(r.Fresh);
         Assert.Single(Directory.GetFiles(Path.GetDirectoryName(path)!, "state.json.corrupt-*"));
     }
+
+    [Fact]
+    public void MissingMembers_ReturnsError_AndPreservesFile()
+    {
+        var path = TempPath();
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        File.WriteAllText(path, "{\"SchemaVersion\":1}");
+        var r = new StateStore(path).Load();
+        Assert.NotNull(r.Error);
+        Assert.Null(r.State);
+        Assert.False(r.Fresh);
+        Assert.Single(Directory.GetFiles(Path.GetDirectoryName(path)!, "state.json.corrupt-*"));
+    }
+
+    [Fact]
+    public void UnsupportedSchemaVersion_ReturnsError()
+    {
+        var a = new AccountRules();
+        var path = TempPath();
+        var state = new PersistedState(99, EvaluationTracker.Start(a), DailyRiskState.New(new DateOnly(2026, 10, 29)), null);
+        new StateStore(path).Save(state);
+        var r = new StateStore(path).Load();
+        Assert.NotNull(r.Error);
+        Assert.Null(r.State);
+        Assert.False(r.Fresh);
+        Assert.Single(Directory.GetFiles(Path.GetDirectoryName(path)!, "state.json.corrupt-*"));
+    }
 }

@@ -2,7 +2,7 @@ using System.Text.Json;
 
 namespace QT_MNQ_Orderflow_Algo.Persistence;
 
-/// <summary>Atomic JSON persistence. Unreadable state fails closed: the caller must halt, never reset.</summary>
+/// <summary>Atomic JSON persistence. Unreadable state fails closed: the caller must halt, never reset. Load never throws.</summary>
 public sealed class StateStore
 {
     private static readonly JsonSerializerOptions Json = new() { WriteIndented = true };
@@ -17,13 +17,34 @@ public sealed class StateStore
         {
             var state = JsonSerializer.Deserialize<PersistedState>(File.ReadAllText(_path), Json)
                         ?? throw new JsonException("null document");
+            Validate(state);
             return new(state, false, null);
         }
-        catch (Exception ex) when (ex is JsonException or NotSupportedException or IOException)
+        catch (Exception ex) when (ex is JsonException or NotSupportedException or IOException or UnauthorizedAccessException)
         {
-            var backup = $"{_path}.corrupt-{DateTime.UtcNow:yyyyMMddHHmmss}";
+            return new(null, false, $"State unreadable ({ex.Message}); {PreserveCorruptFile()}");
+        }
+    }
+
+    private static void Validate(PersistedState state)
+    {
+        if (state.SchemaVersion != PersistedState.CurrentSchemaVersion)
+            throw new JsonException($"unsupported schema version {state.SchemaVersion} (expected {PersistedState.CurrentSchemaVersion})");
+        if (state.Eval is null) throw new JsonException("missing Eval");
+        if (state.Day is null) throw new JsonException("missing Day");
+    }
+
+    private string PreserveCorruptFile()
+    {
+        var backup = $"{_path}.corrupt-{DateTime.UtcNow:yyyyMMddHHmmssfff}-{Guid.NewGuid().ToString("N")[..8]}";
+        try
+        {
             File.Copy(_path, backup, overwrite: false);
-            return new(null, false, $"State unreadable ({ex.Message}); preserved as {backup}");
+            return $"preserved as {backup}";
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return $"BACKUP FAILED ({ex.Message}); original file left in place";
         }
     }
 

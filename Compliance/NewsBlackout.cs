@@ -20,23 +20,49 @@ public sealed class NewsBlackout
     public static NewsBlackout Load(string? csvPath, SessionClock clock, int beforeMin, int afterMin, ILogSink log)
     {
         var events = new List<(DateTime, string)>();
-        if (csvPath is null || !File.Exists(csvPath))
+        if (csvPath is null)
         {
             log.Info("NewsBlackout: no CSV, using recurring 08:30/10:00 ET only");
             return new NewsBlackout(clock, beforeMin, afterMin, events);
         }
-        foreach (var raw in File.ReadAllLines(csvPath))
+
+        if (!File.Exists(csvPath))
         {
-            var line = raw.Trim();
-            if (line.Length == 0 || line.StartsWith('#')) continue;
-            var parts = line.Split(',', 2, StringSplitOptions.TrimEntries);
-            if (!DateTime.TryParseExact(parts[0], "yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture, DateTimeStyles.None, out var et))
-            {
-                log.Error($"NewsBlackout: skipped malformed row '{line}'");
-                continue;
-            }
-            events.Add((clock.EtToUtc(et), parts.Length > 1 ? parts[1] : "News"));
+            log.Error($"NewsBlackout: CSV file not found '{csvPath}', using recurring 08:30/10:00 ET only");
+            return new NewsBlackout(clock, beforeMin, afterMin, events);
         }
+
+        try
+        {
+            foreach (var raw in File.ReadAllLines(csvPath))
+            {
+                var line = raw.Trim();
+                if (line.Length == 0 || line.StartsWith('#')) continue;
+                var parts = line.Split(',', 2, StringSplitOptions.TrimEntries);
+                if (!DateTime.TryParseExact(parts[0], "yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture, DateTimeStyles.None, out var et))
+                {
+                    log.Error($"NewsBlackout: skipped malformed row '{line}'");
+                    continue;
+                }
+                try
+                {
+                    events.Add((clock.EtToUtc(et), parts.Length > 1 ? parts[1] : "News"));
+                }
+                catch (ArgumentException ex)
+                {
+                    log.Error($"NewsBlackout: skipped invalid DST time '{line}': {ex.Message}");
+                }
+            }
+        }
+        catch (IOException ex)
+        {
+            log.Error($"NewsBlackout: failed to read CSV '{csvPath}': {ex.Message}, using recurring 08:30/10:00 ET only");
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            log.Error($"NewsBlackout: no permission to read CSV '{csvPath}': {ex.Message}, using recurring 08:30/10:00 ET only");
+        }
+
         log.Info($"NewsBlackout: {events.Count} CSV events + recurring 08:30/10:00 ET");
         return new NewsBlackout(clock, beforeMin, afterMin, events);
     }
@@ -62,7 +88,7 @@ public sealed class NewsBlackout
     {
         foreach (var e in _events) yield return e;
         var etDate = _clock.ToEt(utc).Date;
-        for (int d = 0; d <= 1; d++)
+        for (int d = 0; d <= 4; d++)
         {
             var date = etDate.AddDays(d);
             if (date.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday) continue;

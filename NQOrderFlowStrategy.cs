@@ -65,6 +65,7 @@ public sealed class NQOrderFlowStrategy : Strategy
     private long _lastTickUtcTicks;
     private string? _lastStatusLine;
     private bool _emergencyLogged;
+    private bool _stateLoadFailed;
 
     public override string[] MonitoringConnectionsIds => new[] { symbol?.ConnectionId ?? "" };
 
@@ -110,6 +111,7 @@ public sealed class NQOrderFlowStrategy : Strategy
         _store = new StateStore(ResolveStatePath());
         var loaded = _store.Load();
         _guard = LucidRiskGuard.ForFlexEvaluation(BuildAccountRules(), _risk, _clock, news, log, loaded.State?.Eval, loaded.State?.Day);
+        _stateLoadFailed = loaded.Error is not null;
         if (loaded.Error is not null) _guard.HaltSafeMode(loaded.Error);
 
         LogWindowsInIst(log);
@@ -237,6 +239,11 @@ public sealed class NQOrderFlowStrategy : Strategy
     {
         try
         {
+            if (_stateLoadFailed)
+            {
+                Log("State not saved: load failed this run; fix or remove the state file to re-enable (fail closed)", StrategyLoggingLevel.Error);
+                return;
+            }
             if (_guard is not null)
                 _store?.Save(new PersistedState(PersistedState.CurrentSchemaVersion, _guard.Eval, _guard.Day, null));
         }

@@ -23,7 +23,12 @@ public sealed class StateStoreTests
         var eval = EvaluationTracker.Start(a)
             .WithTradeClosed(new DateOnly(2026, 10, 28), 300m, 4, new RiskSettings(), a)
             .WithEndOfDay(new DateOnly(2026, 10, 28), 25300m, a);
-        var day = DailyRiskState.New(new DateOnly(2026, 10, 29)) with { HaltReason = "x" };
+        var day = DailyRiskState.New(new DateOnly(2026, 10, 29)) with
+        {
+            HaltReason = "x",
+            LastCloseUtc = new DateTime(2026, 10, 29, 14, 30, 5, DateTimeKind.Utc),
+            StreakPauseUntilUtc = new DateTime(2026, 10, 29, 15, 0, 0, DateTimeKind.Utc),
+        };
         new StateStore(path).Save(new PersistedState(1, eval, day, new DateOnly(2026, 10, 28)));
 
         var loaded = new StateStore(path).Load().State!;
@@ -31,6 +36,10 @@ public sealed class StateStoreTests
         Assert.Equal(300m, loaded.Eval.DailyPnl[new DateOnly(2026, 10, 28)]);
         Assert.Equal(100m, loaded.Eval.MicroscalpPercent);
         Assert.Equal("x", loaded.Day.HaltReason);
+        Assert.Equal(day, loaded.Day);
+        Assert.Equal(25300m, loaded.Eval.EodHighBalance);
+        Assert.False(loaded.Eval.Breached);
+        Assert.Equal(new DateOnly(2026, 10, 28), loaded.LastEodProcessed);
     }
 
     [Fact]
@@ -71,5 +80,29 @@ public sealed class StateStoreTests
         Assert.Null(r.State);
         Assert.False(r.Fresh);
         Assert.Single(Directory.GetFiles(Path.GetDirectoryName(path)!, "state.json.corrupt-*"));
+    }
+
+    [Fact]
+    public void EmptyObjects_FailClosed_AndPreserveFile()
+    {
+        var path = TempPath();
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        File.WriteAllText(path, "{\"SchemaVersion\":1,\"Eval\":{},\"Day\":{}}");
+        var r = new StateStore(path).Load();
+        Assert.NotNull(r.Error);
+        Assert.Null(r.State);
+        Assert.False(r.Fresh);
+        Assert.Single(Directory.GetFiles(Path.GetDirectoryName(path)!, "state.json.corrupt-*"));
+    }
+
+    [Fact]
+    public void PathIsDirectory_ReturnsError_NotFresh()
+    {
+        var path = TempPath();
+        Directory.CreateDirectory(path);
+        var r = new StateStore(path).Load();
+        Assert.NotNull(r.Error);
+        Assert.Null(r.State);
+        Assert.False(r.Fresh);
     }
 }

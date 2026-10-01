@@ -8,10 +8,11 @@ public sealed class StateStore
     private static readonly JsonSerializerOptions Json = new() { WriteIndented = true };
     private readonly string _path;
 
-    public StateStore(string path) => _path = path;
+    public StateStore(string path) => _path = Path.GetFullPath(path);
 
     public LoadResult Load()
     {
+        if (Directory.Exists(_path)) return new(null, false, $"State path is a directory: {_path}");
         if (!File.Exists(_path)) return new(null, true, null);
         try
         {
@@ -20,7 +21,7 @@ public sealed class StateStore
             Validate(state);
             return new(state, false, null);
         }
-        catch (Exception ex) when (ex is JsonException or NotSupportedException or IOException or UnauthorizedAccessException)
+        catch (Exception ex)
         {
             return new(null, false, $"State unreadable ({ex.Message}); {PreserveCorruptFile()}");
         }
@@ -32,6 +33,10 @@ public sealed class StateStore
             throw new JsonException($"unsupported schema version {state.SchemaVersion} (expected {PersistedState.CurrentSchemaVersion})");
         if (state.Eval is null) throw new JsonException("missing Eval");
         if (state.Day is null) throw new JsonException("missing Day");
+        if (state.Eval.DailyPnl is null) throw new JsonException("missing Eval.DailyPnl");
+        if (state.Eval.MllFloor <= 0m) throw new JsonException("invalid Eval.MllFloor");
+        if (state.Eval.EodHighBalance <= 0m) throw new JsonException("invalid Eval.EodHighBalance");
+        if (state.Day.Date == default) throw new JsonException("missing Day.Date");
     }
 
     private string PreserveCorruptFile()
@@ -42,7 +47,7 @@ public sealed class StateStore
             File.Copy(_path, backup, overwrite: false);
             return $"preserved as {backup}";
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        catch (Exception ex)
         {
             return $"BACKUP FAILED ({ex.Message}); original file left in place";
         }

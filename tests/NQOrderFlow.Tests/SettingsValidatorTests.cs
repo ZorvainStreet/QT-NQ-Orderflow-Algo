@@ -87,4 +87,21 @@ public sealed class SettingsValidatorTests
         Assert.True(SettingsValidator.TryParseTimeCsv("  ", out var t));
         Assert.Empty(t);
     }
+
+    [Fact]
+    public void ResolveRecurringNews_Blank_UsesDefaults_NeverEmpty()
+    {
+        Assert.True(SettingsValidator.ResolveRecurringNews("   ", out var t));
+        Assert.Equal(new[] { new TimeSpan(8, 30, 0), new TimeSpan(10, 0, 0) }, t);
+    }
+
+    [Fact]
+    public void ResolveRecurringNews_Custom_IsParsed()
+    {
+        Assert.True(SettingsValidator.ResolveRecurringNews("14:00", out var t));
+        Assert.Equal(new[] { new TimeSpan(14, 0, 0) }, t);
+    }
+
+    [Fact]
+    public void ResolveRecurringNews_Bad_Fails() => Assert.False(SettingsValidator.ResolveRecurringNews("8:3x", out _));
 }

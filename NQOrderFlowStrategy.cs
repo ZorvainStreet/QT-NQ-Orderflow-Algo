@@ -173,6 +173,7 @@ public sealed class NQOrderFlowStrategy : Strategy
         _guard.EnsureTradingDay(NowUtc());
 
         LogWindowsInIst(log);
+        log.Info($"Recurring news blocks ET: {string.Join(", ", session.RecurringNewsEt.Select(t => t.ToString(@"hh\:mm")))}");
         symbol.NewLast += OnNewLast;
         _timer = new Timer(_ => OnTimer(), null, TimerPeriodMs, TimerPeriodMs);
         Log($"Started {_clock.Stamp(NowUtc())} | Phase 1: NO ORDERS", StrategyLoggingLevel.Trading);
@@ -355,7 +356,7 @@ public sealed class NQOrderFlowStrategy : Strategy
             (nameof(FlattenTimeEt), FlattenTimeEt), (nameof(LucidDeadlineEt), LucidDeadlineEt),
             (nameof(TradingDayRollEt), TradingDayRollEt),
         };
-        if (!SettingsValidator.TryParseTimeCsv(RecurringNewsTimesEt, out var recurring)) { badField = nameof(RecurringNewsTimesEt); return false; }
+        if (!SettingsValidator.ResolveRecurringNews(RecurringNewsTimesEt, out var recurring)) { badField = nameof(RecurringNewsTimesEt); return false; }
         var parsed = new Dictionary<string, TimeSpan>();
         foreach (var (name, value) in fields)
         {

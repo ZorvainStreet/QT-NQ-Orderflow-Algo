@@ -40,6 +40,17 @@ public static class SettingsValidator
         return true;
     }
 
+    /// <summary>Recurring news times. Blank means the spec defaults (never "no blocks"); a bad element fails.</summary>
+    public static bool ResolveRecurringNews(string? csv, out IReadOnlyList<TimeSpan> times)
+    {
+        if (string.IsNullOrWhiteSpace(csv))
+        {
+            times = SessionSettings.Default().RecurringNewsEt;
+            return true;
+        }
+        return TryParseTimeCsv(csv, out times);
+    }
+
     private static string? FirstNegative(AccountRules a, RiskSettings r)
     {
         var money = new (string Name, decimal Value)[]

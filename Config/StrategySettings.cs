@@ -20,7 +20,8 @@ public sealed record SessionSettings(
     TimeSpan LucidDeadlineEt,
     TimeSpan TradingDayRollEt,               // 18:00 ET futures session roll
     int NewsBeforeMin,
-    int NewsAfterMin)
+    int NewsAfterMin,
+    IReadOnlyList<TimeSpan> RecurringNewsEt)
 {
     public static SessionSettings Default() => new(
         new[]
@@ -29,7 +30,8 @@ public sealed record SessionSettings(
             new SessionWindow("NY_PM", new(13, 30, 0), new(15, 30, 0), true, 5),
             new SessionWindow("LONDON_OPEN", new(3, 0, 0), new(5, 0, 0), false, 0),
         },
-        new(15, 55, 0), new(16, 45, 0), new(18, 0, 0), 2, 3);
+        new(15, 55, 0), new(16, 45, 0), new(18, 0, 0), 2, 3,
+        new[] { new TimeSpan(8, 30, 0), new TimeSpan(10, 0, 0) });
 }
 
 public sealed record RiskSettings(

@@ -6,6 +6,7 @@ namespace QT_MNQ_Orderflow_Algo.Persistence;
 public sealed class StateStore
 {
     private static readonly JsonSerializerOptions Json = new() { WriteIndented = true };
+    private const int MaxFutureDays = 1;
     private readonly string _path;
 
     public StateStore(string path) => _path = Path.GetFullPath(path);
@@ -37,6 +38,9 @@ public sealed class StateStore
         if (state.Eval.MllFloor <= 0m) throw new JsonException("invalid Eval.MllFloor");
         if (state.Eval.EodHighBalance <= 0m) throw new JsonException("invalid Eval.EodHighBalance");
         if (state.Day.Date == default) throw new JsonException("missing Day.Date");
+        // The futures trading date rolls at 18:00 ET, so "tomorrow" is legitimate; anything later is corrupt or clock-skewed.
+        var latestPlausible = DateOnly.FromDateTime(DateTime.UtcNow).AddDays(MaxFutureDays);
+        if (state.Day.Date > latestPlausible) throw new JsonException($"Day.Date {state.Day.Date:yyyy-MM-dd} is in the future");
     }
 
     private string PreserveCorruptFile()

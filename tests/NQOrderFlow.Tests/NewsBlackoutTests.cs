@@ -75,6 +75,16 @@ public sealed class NewsBlackoutTests
     }
 
     [Fact]
+    public void CustomRecurringTimes_AreUsed_DefaultsNoLongerApply()
+    {
+        var settings = SessionSettings.Default() with { RecurringNewsEt = new[] { new TimeSpan(14, 0, 0) } };
+        var nb = NewsBlackout.Load(null, new SessionClock(settings), 2, 3, new NullLogSink());
+        Assert.True(nb.IsBlocked(Utc(29, 18, 0), out var r));    // 14:00 ET (EDT)
+        Assert.Contains("14:00", r);
+        Assert.False(nb.IsBlocked(Utc(29, 14, 0), out _));       // 10:00 ET no longer blocked
+    }
+
+    [Fact]
     public void MissingCsvFile_LogsError_NotInfo()
     {
         var logs = new TestLogSink();

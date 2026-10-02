@@ -4,7 +4,6 @@ namespace QT_MNQ_Orderflow_Algo.Compliance;
 
 public sealed class NewsBlackout
 {
-    private static readonly TimeSpan[] RecurringEt = { new(8, 30, 0), new(10, 0, 0) };
     private readonly SessionClock _clock;
     private readonly TimeSpan _before, _after;
     private readonly IReadOnlyList<(DateTime Utc, string Label)> _events;
@@ -22,13 +21,13 @@ public sealed class NewsBlackout
         var events = new List<(DateTime, string)>();
         if (csvPath is null)
         {
-            log.Info("NewsBlackout: no CSV, using recurring 08:30/10:00 ET only");
+            log.Info("NewsBlackout: no CSV, using recurring news times only");
             return new NewsBlackout(clock, beforeMin, afterMin, events);
         }
 
         if (!File.Exists(csvPath))
         {
-            log.Error($"NewsBlackout: CSV file not found '{csvPath}', using recurring 08:30/10:00 ET only");
+            log.Error($"NewsBlackout: CSV file not found '{csvPath}', using recurring news times only");
             return new NewsBlackout(clock, beforeMin, afterMin, events);
         }
 
@@ -56,14 +55,14 @@ public sealed class NewsBlackout
         }
         catch (IOException ex)
         {
-            log.Error($"NewsBlackout: failed to read CSV '{csvPath}': {ex.Message}, using recurring 08:30/10:00 ET only");
+            log.Error($"NewsBlackout: failed to read CSV '{csvPath}': {ex.Message}, using recurring news times only");
         }
         catch (UnauthorizedAccessException ex)
         {
-            log.Error($"NewsBlackout: no permission to read CSV '{csvPath}': {ex.Message}, using recurring 08:30/10:00 ET only");
+            log.Error($"NewsBlackout: no permission to read CSV '{csvPath}': {ex.Message}, using recurring news times only");
         }
 
-        log.Info($"NewsBlackout: {events.Count} CSV events + recurring 08:30/10:00 ET");
+        log.Info($"NewsBlackout: {events.Count} CSV events + recurring news times");
         return new NewsBlackout(clock, beforeMin, afterMin, events);
     }
 
@@ -92,7 +91,7 @@ public sealed class NewsBlackout
         {
             var date = etDate.AddDays(d);
             if (date.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday) continue;
-            foreach (var t in RecurringEt) yield return (_clock.EtToUtc(date + t), $"Recurring {t:hh\\:mm}");
+            foreach (var t in _clock.Settings.RecurringNewsEt) yield return (_clock.EtToUtc(date + t), $"Recurring {t:hh\\:mm}");
         }
     }
 }

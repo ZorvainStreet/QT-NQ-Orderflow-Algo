@@ -30,18 +30,22 @@ public sealed class NQOrderFlowStrategy : Strategy
 
     [InputParameter("NY AM start ET", 200)] public string NyAmStart = "09:35";
     [InputParameter("NY AM end ET", 210)] public string NyAmEnd = "11:45";
+    [InputParameter("NY AM score add", 215, 0, 50, 1, 0)] public int NyAmScoreAdd = 0;
     [InputParameter("NY PM enabled", 220)] public bool NyPmEnabled = true;
     [InputParameter("NY PM start ET", 230)] public string NyPmStart = "13:30";
     [InputParameter("NY PM end ET", 240)] public string NyPmEnd = "15:30";
+    [InputParameter("NY PM score add", 245, 0, 50, 1, 0)] public int NyPmScoreAdd = 5;
     [InputParameter("London enabled", 250)] public bool LondonEnabled = false;
     [InputParameter("London start ET", 252)] public string LondonStart = "03:00";
     [InputParameter("London end ET", 254)] public string LondonEnd = "05:00";
+    [InputParameter("London score add", 256, 0, 50, 1, 0)] public int LondonScoreAdd = 0;
     [InputParameter("Flatten time ET", 260)] public string FlattenTimeEt = "15:55";
     [InputParameter("Lucid deadline ET", 262)] public string LucidDeadlineEt = "16:45";
     [InputParameter("Trading day roll ET", 264)] public string TradingDayRollEt = "18:00";
     [InputParameter("News CSV path", 270)] public string NewsCsvPath = "";
     [InputParameter("News block before (min)", 272, 0, 60, 1, 0)] public int NewsBeforeMin = 2;
     [InputParameter("News block after (min)", 274, 0, 60, 1, 0)] public int NewsAfterMin = 3;
+    [InputParameter("Recurring news times ET", 276)] public string RecurringNewsTimesEt = "08:30,10:00";
 
     [InputParameter("Tier A min headroom USD", 290)] public double TierAMinHeadroom = 900;
     [InputParameter("Tier B min headroom USD", 295)] public double TierBMinHeadroom = 600;
@@ -77,12 +81,15 @@ public sealed class NQOrderFlowStrategy : Strategy
     private StateStore? _store;
     private RiskSettings _risk = new();
     private Timer? _timer;
-    private int _consecutiveErrors;
+    private int _tickErrors;   // separate counters: a healthy handler must not reset a failing one
+    private int _timerErrors;
     private long _lastTickUtcTicks;
     private string? _lastStatusLine;
     private bool _emergencyLogged;
     private bool _stateLoadFailed;
     private volatile bool _stopping;
+    // Deliberately NOT reset in OnRun. A stale timer callback that outlives a stop/start clears this in its
+    // own finally block; forcing it to 0 here would let a new callback overlap that stale one.
     private int _timerBusy;
     private int _tickKindLogged;
 
@@ -102,6 +109,8 @@ public sealed class NQOrderFlowStrategy : Strategy
         _stateLoadFailed = false;
         _stopping = false;
         _lastStatusLine = null;
+        Interlocked.Exchange(ref _tickErrors, 0);
+        Interlocked.Exchange(ref _timerErrors, 0);
         Interlocked.Exchange(ref _lastTickUtcTicks, 0);
         Interlocked.Exchange(ref _tickKindLogged, 0);
         try
@@ -147,6 +156,13 @@ public sealed class NQOrderFlowStrategy : Strategy
 
         var log = new QuantowerLogSink(this);
         _risk = BuildRiskSettings();
+        var rangeError = SettingsValidator.FirstError(BuildAccountRules(), _risk, session);
+        if (rangeError is not null)
+        {
+            Log($"Invalid input: {rangeError}", StrategyLoggingLevel.Error);
+            Stop();
+            return;
+        }
         _clock = new SessionClock(session);
         var news = NewsBlackout.Load(string.IsNullOrWhiteSpace(NewsCsvPath) ? null : NewsCsvPath, _clock, NewsBeforeMin, NewsAfterMin, log);
         _store = new StateStore(ResolveStatePath());
@@ -241,14 +257,14 @@ public sealed class NQOrderFlowStrategy : Strategy
         if (Interlocked.Exchange(ref _tickKindLogged, 1) == 0)
             Log($"First tick: Last.Time={last.Time:O} Kind={last.Time.Kind} (tick age assumes UTC)", StrategyLoggingLevel.Info);
         Interlocked.Exchange(ref _lastTickUtcTicks, last.Time.Ticks);
-    });
+    }, ref _tickErrors);
 
     private void OnTimer()
     {
         if (_stopping || Interlocked.Exchange(ref _timerBusy, 1) == 1) return; // stopped, or previous tick still running
         try
         {
-            if (!_stopping) Guarded(TimerTick);
+            if (!_stopping) Guarded(TimerTick, ref _timerErrors);
         }
         finally
         {
@@ -284,17 +300,17 @@ public sealed class NQOrderFlowStrategy : Strategy
         Log($"{_clock.Stamp(now)} | {line}", StrategyLoggingLevel.Info);
     }
 
-    private void Guarded(Action action)
+    private void Guarded(Action action, ref int consecutiveErrors)
     {
         try
         {
             action();
-            Interlocked.Exchange(ref _consecutiveErrors, 0);
+            Interlocked.Exchange(ref consecutiveErrors, 0);
         }
         catch (Exception ex)
         {
             Log($"Handler error: {ex}", StrategyLoggingLevel.Error);
-            if (Interlocked.Increment(ref _consecutiveErrors) >= _risk.SafeModeExceptionCount)
+            if (Interlocked.Increment(ref consecutiveErrors) >= _risk.SafeModeExceptionCount)
                 _guard?.HaltSafeMode("Repeated handler exceptions");
         }
     }
@@ -339,6 +355,7 @@ public sealed class NQOrderFlowStrategy : Strategy
             (nameof(FlattenTimeEt), FlattenTimeEt), (nameof(LucidDeadlineEt), LucidDeadlineEt),
             (nameof(TradingDayRollEt), TradingDayRollEt),
         };
+        if (!SettingsValidator.TryParseTimeCsv(RecurringNewsTimesEt, out var recurring)) { badField = nameof(RecurringNewsTimesEt); return false; }
         var parsed = new Dictionary<string, TimeSpan>();
         foreach (var (name, value) in fields)
         {
@@ -349,15 +366,16 @@ public sealed class NQOrderFlowStrategy : Strategy
         {
             Windows = new[]
             {
-                new SessionWindow("NY_AM_KILLZONE", parsed[nameof(NyAmStart)], parsed[nameof(NyAmEnd)], true, 0),
-                new SessionWindow("NY_PM", parsed[nameof(NyPmStart)], parsed[nameof(NyPmEnd)], NyPmEnabled, 5),
-                new SessionWindow("LONDON_OPEN", parsed[nameof(LondonStart)], parsed[nameof(LondonEnd)], LondonEnabled, 0),
+                new SessionWindow("NY_AM_KILLZONE", parsed[nameof(NyAmStart)], parsed[nameof(NyAmEnd)], true, NyAmScoreAdd),
+                new SessionWindow("NY_PM", parsed[nameof(NyPmStart)], parsed[nameof(NyPmEnd)], NyPmEnabled, NyPmScoreAdd),
+                new SessionWindow("LONDON_OPEN", parsed[nameof(LondonStart)], parsed[nameof(LondonEnd)], LondonEnabled, LondonScoreAdd),
             },
             FlattenTimeEt = parsed[nameof(FlattenTimeEt)],
             LucidDeadlineEt = parsed[nameof(LucidDeadlineEt)],
             TradingDayRollEt = parsed[nameof(TradingDayRollEt)],
             NewsBeforeMin = NewsBeforeMin,
             NewsAfterMin = NewsAfterMin,
+            RecurringNewsEt = recurring,
         };
         badField = "";
         return true;
@@ -410,8 +428,17 @@ public sealed class NQOrderFlowStrategy : Strategy
         var etToday = _clock!.ToEt(NowUtc()).Date;
         foreach (var w in _clock.Settings.Windows.Where(w => w.Enabled))
         {
-            var startUtc = _clock.EtToUtc(etToday + w.StartEt);
-            var endUtc = _clock.EtToUtc(etToday + w.EndEt);
+            DateTime startUtc, endUtc;
+            try
+            {
+                startUtc = _clock.EtToUtc(etToday + w.StartEt);
+                endUtc = _clock.EtToUtc(etToday + w.EndEt);
+            }
+            catch (ArgumentException ex) // DST-gap local time does not exist today
+            {
+                log.Error($"{w.Name}: {w.StartEt.ToString(HhMm)}-{w.EndEt.ToString(HhMm)} ET not shown, invalid local time today: {ex.Message}");
+                continue;
+            }
             log.Info($"{w.Name}: {w.StartEt:hh\\:mm}-{w.EndEt:hh\\:mm} ET = {_clock.ToIst(startUtc):HH:mm}-{_clock.ToIst(endUtc):HH:mm} IST (today)");
         }
     }

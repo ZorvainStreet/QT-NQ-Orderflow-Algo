@@ -2,12 +2,14 @@ using System.Diagnostics.Metrics;
 using System.Globalization;
 using QT_MNQ_Orderflow_Algo.Compliance;
 using QT_MNQ_Orderflow_Algo.Config;
+using QT_MNQ_Orderflow_Algo.Data;
 using QT_MNQ_Orderflow_Algo.Persistence;
+using QT_MNQ_Orderflow_Algo.Telemetry;
 using TradingPlatform.BusinessLayer;
 
 namespace QT_MNQ_Orderflow_Algo;
 
-/// <summary>Phase 1: lifecycle, inputs, clock, risk layer, persistence, metrics. Places NO orders.</summary>
+/// <summary>Phase 2: Phase 1 shell plus live feed, tick backfill, order-flow pipeline and bar debug log. Places NO orders.</summary>
 public sealed class NQOrderFlowStrategy : Strategy
 {
     private const int TimerPeriodMs = 1000;
@@ -73,6 +75,33 @@ public sealed class NQOrderFlowStrategy : Strategy
     [InputParameter("Microscalp halt %", 365)] public double MicroscalpHaltPercent = 35;
     [InputParameter("Safe-mode exception count", 370, 1, 100, 1, 0)] public int SafeModeExceptionCount = 5;
 
+    // Phase 2 data / order-flow inputs (sort 400-499). Defaults equal the DataSettings record defaults;
+    // ranges are checked by SettingsValidator.Validate(DataSettings), not by the UI min/max.
+    [InputParameter("Bad-tick max distance (ticks)", 400, 0, 10000, 1, 0)] public int BadTickMaxTicks = 40;
+    [InputParameter("Bad-tick confirm count", 402, 0, 100, 1, 0)] public int BadTickConfirmCount = 3;
+    [InputParameter("Drop identical prints", 404)] public bool DropIdenticalPrints = false;
+    [InputParameter("Aggressor fallback warn %", 406)] public double FallbackWarnPercent = 5;
+    [InputParameter("Max tick age (s)", 408, 0, 3600, 1, 0)] public int MaxTickAgeSeconds = 3;
+    [InputParameter("Bar history capacity", 410, 0, 100000, 1, 0)] public int BarHistoryCapacity = 500;
+    [InputParameter("Imbalance ratio", 420)] public double ImbalanceRatio = 3.0;
+    [InputParameter("Imbalance min volume", 422)] public double ImbalanceMinVolume = 12;
+    [InputParameter("Stacked imbalance levels", 424, 0, 100, 1, 0)] public int StackedLevels = 3;
+    [InputParameter("Tape short window (s)", 430, 0, 3600, 1, 0)] public int TapeShortSeconds = 5;
+    [InputParameter("Tape mid window (s)", 432, 0, 3600, 1, 0)] public int TapeMidSeconds = 20;
+    [InputParameter("Tape long window (s)", 434, 0, 3600, 1, 0)] public int TapeLongSeconds = 60;
+    [InputParameter("Baseline (min)", 436, 0, 1440, 1, 0)] public int BaselineMinutes = 30;
+    [InputParameter("Median bar lookback", 438, 0, 1000, 1, 0)] public int MedianBarLookback = 30;
+    [InputParameter("Absorption volume multiple", 440)] public double AbsorptionVolMultiple = 2.0;
+    [InputParameter("Absorption max progress (ticks)", 442, 0, 1000, 1, 0)] public int AbsorptionMaxProgressTicks = 3;
+    [InputParameter("Absorption dominance %", 444)] public double AbsorptionDominancePercent = 65;
+    [InputParameter("Delta flip min multiple", 446)] public double DeltaFlipMinMultiple = 0.5;
+    [InputParameter("Velocity Z limit", 448)] public double VelocityZLimit = 3.0;
+    [InputParameter("Value area %", 450)] public double ValueAreaPercent = 70;
+    [InputParameter("Opening range short (min)", 460, 0, 600, 1, 0)] public int OpeningRangeShortMinutes = 5;
+    [InputParameter("Opening range long (min)", 462, 0, 600, 1, 0)] public int OpeningRangeLongMinutes = 15;
+    [InputParameter("RTH open ET", 470)] public string RthOpenEt = "09:30";
+    [InputParameter("RTH close ET", 472)] public string RthCloseEt = "16:00";
+
     [InputParameter("State path (blank = Documents/NQ_OrderFlow/state.json)", 900)] public string StatePath = "";
     [InputParameter("EMERGENCY FLATTEN", 999)] public bool EmergencyFlatten = false;
 
@@ -83,7 +112,7 @@ public sealed class NQOrderFlowStrategy : Strategy
     private Timer? _timer;
     private int _tickErrors;   // separate counters: a healthy handler must not reset a failing one
     private int _timerErrors;
-    private long _lastTickUtcTicks;
+    private int _quoteErrors;
     private string? _lastStatusLine;
     private bool _emergencyLogged;
     private bool _stateLoadFailed;
@@ -93,12 +122,25 @@ public sealed class NQOrderFlowStrategy : Strategy
     private int _timerBusy;
     private int _tickKindLogged;
 
+    private const int LogDrainPerTick = 50;
+    private const int LiveBufferCapacity = 200_000;
+    private const int LogQueueCapacity = 1_000;
+    private const string ErrorPrefix = "ERROR ";
+    private volatile MarketDataPipeline? _pipeline;
+    private readonly object _feedGate = new();
+    private readonly Queue<RawTrade> _liveBuffer = new();  // guarded by _feedGate
+    private bool _backfilling;                              // guarded by _feedGate
+    private bool _liveOverflow;                             // guarded by _feedGate
+    private volatile BoundedQueue<string> _logQueue = new(LogQueueCapacity);
+    private CancellationTokenSource? _backfillCts;
+    private string? _lastHealthLine;
+
     public override string[] MonitoringConnectionsIds => new[] { symbol?.ConnectionId ?? "" };
 
     public NQOrderFlowStrategy()
     {
         Name = "NQ OrderFlow LucidFlex";
-        Description = "Phase 1 shell: clock + risk layer, no orders";
+        Description = "Phase 2: clock, risk layer, order-flow data pipeline; no orders";
     }
 
     protected override void OnRun()
@@ -111,8 +153,17 @@ public sealed class NQOrderFlowStrategy : Strategy
         _lastStatusLine = null;
         Interlocked.Exchange(ref _tickErrors, 0);
         Interlocked.Exchange(ref _timerErrors, 0);
-        Interlocked.Exchange(ref _lastTickUtcTicks, 0);
+        Interlocked.Exchange(ref _quoteErrors, 0);
         Interlocked.Exchange(ref _tickKindLogged, 0);
+        _pipeline = null;
+        _lastHealthLine = null;
+        lock (_feedGate)
+        {
+            _backfilling = false;
+            _liveOverflow = false;
+            _liveBuffer.Clear();
+        }
+        _logQueue = new BoundedQueue<string>(LogQueueCapacity);
         try
         {
             RunCore();
@@ -163,6 +214,19 @@ public sealed class NQOrderFlowStrategy : Strategy
             Stop();
             return;
         }
+        if (!TryBuildDataSettings(out var dataSettings, out var badDataField))
+        {
+            Log($"Invalid HH:mm in input '{badDataField}'", StrategyLoggingLevel.Error);
+            Stop();
+            return;
+        }
+        var dataError = SettingsValidator.Validate(dataSettings);
+        if (dataError is not null)
+        {
+            Log($"Invalid data input: {dataError}", StrategyLoggingLevel.Error);
+            Stop();
+            return;
+        }
         _clock = new SessionClock(session);
         var news = NewsBlackout.Load(string.IsNullOrWhiteSpace(NewsCsvPath) ? null : NewsCsvPath, _clock, NewsBeforeMin, NewsAfterMin, log);
         _store = new StateStore(ResolveStatePath());
@@ -174,9 +238,74 @@ public sealed class NQOrderFlowStrategy : Strategy
 
         LogWindowsInIst(log);
         log.Info($"Recurring news blocks ET: {string.Join(", ", session.RecurringNewsEt.Select(t => t.ToString(@"hh\:mm")))}");
-        symbol.NewLast += OnNewLast;
+        StartFeed(symbol, dataSettings);
         _timer = new Timer(_ => OnTimer(), null, TimerPeriodMs, TimerPeriodMs);
-        Log($"Started {_clock.Stamp(NowUtc())} | Phase 1: NO ORDERS", StrategyLoggingLevel.Trading);
+        Log($"Started {_clock.Stamp(NowUtc())} | Phase 2 data: NO ORDERS", StrategyLoggingLevel.Trading);
+    }
+
+    /// <summary>Subscribes the live feed (buffered while backfilling), then backfills from the prior session start.</summary>
+    private void StartFeed(Symbol sym, DataSettings dataSettings)
+    {
+        var pipeline = new MarketDataPipeline(dataSettings, _clock!, (decimal)sym.TickSize);
+        lock (_feedGate) { _backfilling = true; }
+        _pipeline = pipeline;
+        sym.NewLast += OnNewLast;
+        sym.NewQuote += OnNewQuote;
+        var now = NowUtc();
+        var fromUtc = _clock!.SessionStartUtc(_clock.PreviousTradingDate(_clock.TradingDate(now)));
+        var cts = new CancellationTokenSource();
+        _backfillCts = cts;
+        var token = cts.Token;
+        Log($"Backfill started {_clock.Stamp(fromUtc)} → {_clock.Stamp(now)}", StrategyLoggingLevel.Info);
+        _ = Task.Run(() => RunBackfill(sym, pipeline, fromUtc, now, token), token);
+    }
+
+    private void RunBackfill(Symbol sym, MarketDataPipeline pipeline, DateTime fromUtc, DateTime toUtc, CancellationToken token)
+    {
+        try
+        {
+            var lastBackfilled = QuantowerMarketData.Backfill(sym, fromUtc, toUtc, raw => pipeline.OnTrade(raw), token);
+            lock (_feedGate)
+            {
+                // A cancelled or superseded run must not touch the new run's hand-off state.
+                if (token.IsCancellationRequested || !ReferenceEquals(_pipeline, pipeline)) return;
+                var replayed = 0;
+                while (_liveBuffer.Count > 0)
+                {
+                    var raw = _liveBuffer.Dequeue();
+                    if (lastBackfilled is null || raw.Utc > lastBackfilled.Value) { pipeline.OnTrade(raw); replayed++; }
+                }
+                _backfilling = false;
+                if (_liveOverflow)
+                {
+                    _logQueue.TryEnqueue($"{ErrorPrefix}Live buffer overflowed during backfill: data stays unhealthy (warmup incomplete). Restart the strategy.");
+                    return;
+                }
+                pipeline.MarkWarmupComplete();
+                _logQueue.TryEnqueue($"Backfill done {_clock!.Stamp(fromUtc)} → {_clock.Stamp(toUtc)}; last {lastBackfilled:O}; replayed {replayed} live ticks");
+            }
+        }
+        catch (OperationCanceledException) when (token.IsCancellationRequested) { }
+        catch (Exception ex) when (token.IsCancellationRequested)
+        {
+            _logQueue.TryEnqueue($"Backfill stopped during shutdown: {ex.Message}");
+        }
+        catch (Exception ex)
+        {
+            _logQueue.TryEnqueue($"{ErrorPrefix}Backfill FAILED: {ex.Message}. Data stays unhealthy (warmup incomplete).");
+            lock (_feedGate)
+            {
+                if (!ReferenceEquals(_pipeline, pipeline)) return;
+                _backfilling = false; // live ticks flow again, but warmup is never marked complete (fail closed)
+                _liveBuffer.Clear();
+            }
+        }
+    }
+
+    private void BufferLive(RawTrade raw)
+    {
+        if (_liveBuffer.Count < LiveBufferCapacity) _liveBuffer.Enqueue(raw);
+        else _liveOverflow = true;
     }
 
     protected override void OnStop()
@@ -188,7 +317,18 @@ public sealed class NQOrderFlowStrategy : Strategy
             using var done = new ManualResetEvent(false);
             if (timer.Dispose(done)) done.WaitOne(TimerDisposeWaitMs); // wait for an in-flight callback
         }
-        if (symbol is not null) symbol.NewLast -= OnNewLast;
+        var cts = Interlocked.Exchange(ref _backfillCts, null);
+        if (cts is not null)
+        {
+            cts.Cancel();
+            cts.Dispose();
+        }
+        if (symbol is not null)
+        {
+            symbol.NewLast -= OnNewLast;
+            symbol.NewQuote -= OnNewQuote;
+        }
+        DrainLogQueue(int.MaxValue);
         SaveState();
     }
 
@@ -220,8 +360,19 @@ public sealed class NQOrderFlowStrategy : Strategy
         Gauge(meter, "Daily halt", () => _guard is null ? null : _guard.DailyHaltActive ? 1 : 0);
         Gauge(meter, "Manual re-enable", () => _guard is null ? null : _guard.ManualReenableRequired ? 1 : 0);
         Gauge(meter, "Minutes to next window", () => MinutesToNextWindow());
-        Gauge(meter, "Last tick age (s)", () => TickAgeSeconds());
+        Gauge(meter, "last_tick_age_s", () => TickAgeSeconds());
+        Gauge(meter, "data_warm", () => DataHealthNow() is { } h ? (h.WarmupComplete ? 1 : 0) : null);
+        Gauge(meter, "data_healthy", () => DataHealthNow() is { } h ? (h.IsHealthy ? 1 : 0) : null);
+        Gauge(meter, "fallback_pct", () => DataHealthNow() is { } h ? (decimal)h.FallbackPercent : null);
+        Gauge(meter, "ticks_accepted", () => DataHealthNow()?.Accepted);
+        Gauge(meter, "ticks_dropped", () => DataHealthNow()?.Dropped);
+        Gauge(meter, "session_cvd", () => _pipeline?.Snapshot(NowUtc()).SessionCvd);
+        Gauge(meter, "vwap", () => _pipeline?.Levels().Vwap);
+        Gauge(meter, "last_bar_delta", () => _pipeline?.Snapshot(NowUtc()).LastBarDelta);
+        Gauge(meter, "log_dropped", () => _logQueue.Dropped);
     }
+
+    private DataHealth? DataHealthNow() => _pipeline?.Health(NowUtc());
 
     private void Gauge(Meter meter, string name, Func<decimal?> read) =>
         meter.CreateObservableGauge(name, () =>
@@ -247,18 +398,73 @@ public sealed class NQOrderFlowStrategy : Strategy
         return _clock.NextWindowOpen(now) is { } nx ? (decimal)(nx.OpensUtc - now).TotalMinutes : null;
     }
 
-    private decimal? TickAgeSeconds()
-    {
-        var ticks = Interlocked.Read(ref _lastTickUtcTicks);
-        return ticks == 0 ? null : (decimal)(NowUtc() - new DateTime(ticks, DateTimeKind.Utc)).TotalSeconds;
-    }
+    private decimal? TickAgeSeconds() =>
+        DataHealthNow() is { } h && double.IsFinite(h.LastTickAgeSeconds) ? (decimal)h.LastTickAgeSeconds : null;
 
-    private void OnNewLast(Symbol s, Last last) => Guarded(() =>
+    private void OnNewLast(Symbol s, Last last) => GuardedQueued(() =>
     {
         if (Interlocked.Exchange(ref _tickKindLogged, 1) == 0)
-            Log($"First tick: Last.Time={last.Time:O} Kind={last.Time.Kind} (tick age assumes UTC)", StrategyLoggingLevel.Info);
-        Interlocked.Exchange(ref _lastTickUtcTicks, last.Time.Ticks);
+            _logQueue.TryEnqueue($"First tick: Last.Time={last.Time:O} Kind={last.Time.Kind} (tick age assumes UTC)");
+        var raw = QuantowerMarketData.ToRawTrade(last);
+        FootprintBar? closed;
+        lock (_feedGate)
+        {
+            if (_backfilling) { BufferLive(raw); return; }
+            closed = _pipeline?.OnTrade(raw);
+        }
+        if (closed is not null) EnqueueBarLog(closed);
     }, ref _tickErrors);
+
+    /// <summary>Quotes are dropped while backfilling so live bid/ask never classifies historical ticks.</summary>
+    private void OnNewQuote(Symbol s, Quote quote) => GuardedQueued(() =>
+    {
+        var raw = QuantowerMarketData.ToRawQuote(quote);
+        lock (_feedGate)
+        {
+            if (_backfilling) return;
+        }
+        _pipeline?.OnQuote(raw);
+    }, ref _quoteErrors);
+
+    private void EnqueueBarLog(FootprintBar b)
+    {
+        var pipeline = _pipeline;
+        if (pipeline is null || _clock is null) return;
+        var lv = pipeline.Levels();
+        var s = pipeline.Snapshot(b.StartUtc.AddMinutes(1));
+        _logQueue.TryEnqueue(
+            $"BAR {_clock.ToEt(b.StartUtc):HH:mm} ET O {b.Open} H {b.High} L {b.Low} C {b.Close} V {b.TotalVolume} " +
+            $"Δ {b.Delta} (max {b.MaxDelta} min {b.MinDelta}) POC {b.Poc} stackB {s.StackedBuyLevels} stackS {s.StackedSellLevels} " +
+            $"| VWAP {lv.Vwap:F2} σ {lv.VwapStdDev:F2} dPOC {lv.Developing?.Poc} VAH {lv.Developing?.Vah} VAL {lv.Developing?.Val} " +
+            $"| CVD {s.SessionCvd} flip {s.DeltaFlip} velZ {s.VelocityZ:F1} ctx {s.Context}");
+    }
+
+    /// <summary>Pipeline timer and health transitions. OnTimer never runs while backfilling (checked under _feedGate).</summary>
+    private void DataTick(DateTime now)
+    {
+        var pipeline = _pipeline;
+        if (pipeline is null) return;
+        FootprintBar? closed = null;
+        lock (_feedGate)
+        {
+            if (!_backfilling) closed = pipeline.OnTimer(now);
+        }
+        if (closed is not null) EnqueueBarLog(closed);
+        var h = pipeline.Health(now);
+        var line = $"Data {(h.IsHealthy ? "HEALTHY" : "UNHEALTHY")} warm={h.WarmupComplete} fallbackWarning={h.FallbackWarning}";
+        if (line == _lastHealthLine) return;
+        _lastHealthLine = line;
+        Log($"{line} (fallback {h.FallbackPercent:F1}%, tick age {h.LastTickAgeSeconds:F1}s)", StrategyLoggingLevel.Trading);
+    }
+
+    private void DrainLogQueue(int max)
+    {
+        foreach (var line in _logQueue.Drain(max))
+        {
+            if (line.StartsWith(ErrorPrefix, StringComparison.Ordinal)) Log(line[ErrorPrefix.Length..], StrategyLoggingLevel.Error);
+            else Log(line, StrategyLoggingLevel.Info);
+        }
+    }
 
     private void OnTimer()
     {
@@ -275,7 +481,20 @@ public sealed class NQOrderFlowStrategy : Strategy
 
     private void TimerTick()
     {
-        var now = NowUtc();
+        try
+        {
+            var now = NowUtc();
+            RiskTick(now); // Phase 1 risk/day roll first, unchanged
+            DataTick(now);
+        }
+        finally
+        {
+            DrainLogQueue(LogDrainPerTick); // drains even if a tick step threw
+        }
+    }
+
+    private void RiskTick(DateTime now)
+    {
         _guard!.EnsureTradingDay(now);
         if (EmergencyFlatten && !_emergencyLogged)
         {
@@ -311,6 +530,22 @@ public sealed class NQOrderFlowStrategy : Strategy
         catch (Exception ex)
         {
             Log($"Handler error: {ex}", StrategyLoggingLevel.Error);
+            if (Interlocked.Increment(ref consecutiveErrors) >= _risk.SafeModeExceptionCount)
+                _guard?.HaltSafeMode("Repeated handler exceptions");
+        }
+    }
+
+    /// <summary>Feed-handler variant of <see cref="Guarded"/>: the error line goes through _logQueue (no blocking I/O).</summary>
+    private void GuardedQueued(Action action, ref int consecutiveErrors)
+    {
+        try
+        {
+            action();
+            Interlocked.Exchange(ref consecutiveErrors, 0);
+        }
+        catch (Exception ex)
+        {
+            _logQueue.TryEnqueue($"{ErrorPrefix}Feed handler error: {ex}");
             if (Interlocked.Increment(ref consecutiveErrors) >= _risk.SafeModeExceptionCount)
                 _guard?.HaltSafeMode("Repeated handler exceptions");
         }
@@ -381,6 +616,40 @@ public sealed class NQOrderFlowStrategy : Strategy
         badField = "";
         return true;
     }
+
+    private bool TryBuildDataSettings(out DataSettings settings, out string badField)
+    {
+        settings = new DataSettings();
+        if (!TimeSpan.TryParseExact(RthOpenEt?.Trim(), HhMm, CultureInfo.InvariantCulture, out var rthOpen)) { badField = nameof(RthOpenEt); return false; }
+        if (!TimeSpan.TryParseExact(RthCloseEt?.Trim(), HhMm, CultureInfo.InvariantCulture, out var rthClose)) { badField = nameof(RthCloseEt); return false; }
+        settings = BuildDataSettings() with { RthOpenEt = rthOpen, RthCloseEt = rthClose };
+        badField = "";
+        return true;
+    }
+
+    private DataSettings BuildDataSettings() => new(
+        BadTickMaxTicks: BadTickMaxTicks,
+        BadTickConfirmCount: BadTickConfirmCount,
+        DropIdenticalPrints: DropIdenticalPrints,
+        FallbackWarnPercent: FallbackWarnPercent,
+        MaxTickAgeSeconds: MaxTickAgeSeconds,
+        BarHistoryCapacity: BarHistoryCapacity,
+        ImbalanceRatio: (decimal)ImbalanceRatio,
+        ImbalanceMinVolume: (decimal)ImbalanceMinVolume,
+        StackedLevels: StackedLevels,
+        TapeShortSeconds: TapeShortSeconds,
+        TapeMidSeconds: TapeMidSeconds,
+        TapeLongSeconds: TapeLongSeconds,
+        BaselineMinutes: BaselineMinutes,
+        AbsorptionVolMultiple: (decimal)AbsorptionVolMultiple,
+        AbsorptionMaxProgressTicks: AbsorptionMaxProgressTicks,
+        AbsorptionDominancePercent: (decimal)AbsorptionDominancePercent,
+        DeltaFlipMinMultiple: (decimal)DeltaFlipMinMultiple,
+        VelocityZLimit: VelocityZLimit,
+        ValueAreaPercent: (decimal)ValueAreaPercent,
+        OpeningRangeShortMinutes: OpeningRangeShortMinutes,
+        OpeningRangeLongMinutes: OpeningRangeLongMinutes,
+        MedianBarLookback: MedianBarLookback);
 
     private AccountRules BuildAccountRules() => new()
     {

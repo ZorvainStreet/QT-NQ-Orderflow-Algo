@@ -104,4 +104,23 @@ public sealed class SettingsValidatorTests
 
     [Fact]
     public void ResolveRecurringNews_Bad_Fails() => Assert.False(SettingsValidator.ResolveRecurringNews("8:3x", out _));
+
+    [Fact]
+    public void DataSettings_DefaultsAreValid() => Assert.Null(SettingsValidator.Validate(new DataSettings()));
+
+    [Theory]
+    [MemberData(nameof(BadDataSettings))]
+    public void DataSettings_BadValues_AreRejected(DataSettings s) => Assert.NotNull(SettingsValidator.Validate(s));
+
+    public static IEnumerable<object[]> BadDataSettings() => new[]
+    {
+        new object[] { new DataSettings(ImbalanceRatio: 0.9m) },
+        new object[] { new DataSettings(StackedLevels: 0) },
+        new object[] { new DataSettings(TapeShortSeconds: 20, TapeMidSeconds: 20) },
+        new object[] { new DataSettings(OpeningRangeShortMinutes: 15, OpeningRangeLongMinutes: 15) },
+        new object[] { new DataSettings(ValueAreaPercent: 0m) },
+        new object[] { new DataSettings(AbsorptionDominancePercent: 101m) },
+        new object[] { new DataSettings(BaselineMinutes: 0) },
+        new object[] { new DataSettings() with { RthOpenEt = new(16, 0, 0) } },
+    };
 }

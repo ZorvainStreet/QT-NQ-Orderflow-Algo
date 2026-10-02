@@ -26,6 +26,23 @@ public static class SettingsValidator
         return null;
     }
 
+    /// <summary>Range and ordering checks for the Phase 2 data settings. Returns the first problem, or null.</summary>
+    public static string? Validate(DataSettings s)
+    {
+        if (s.BadTickMaxTicks < 1 || s.BadTickConfirmCount < 1) return "Bad-tick settings must be >= 1";
+        if (s.MaxTickAgeSeconds < 1 || s.BarHistoryCapacity < 20) return "MaxTickAgeSeconds >= 1 and BarHistoryCapacity >= 20 required";
+        if (s.ImbalanceRatio < 1m || s.ImbalanceMinVolume < 0m || s.StackedLevels < 1) return "Imbalance settings out of range";
+        if (!(0 < s.TapeShortSeconds && s.TapeShortSeconds < s.TapeMidSeconds && s.TapeMidSeconds < s.TapeLongSeconds))
+            return "Tape windows must satisfy 0 < short < mid < long";
+        if (s.BaselineMinutes < 1 || s.MedianBarLookback < 1) return "Baseline and lookback must be >= 1";
+        if (s.AbsorptionVolMultiple <= 0m || s.AbsorptionMaxProgressTicks < 0 || s.DeltaFlipMinMultiple < 0m) return "Absorption/flip settings out of range";
+        if (s.AbsorptionDominancePercent is < 0m or > 100m || s.ValueAreaPercent is <= 0m or > 100m) return "Percent settings out of range";
+        if (s.FallbackWarnPercent is < 0 or > 100 || s.VelocityZLimit <= 0) return "Fallback/velocity settings out of range";
+        if (!(0 < s.OpeningRangeShortMinutes && s.OpeningRangeShortMinutes < s.OpeningRangeLongMinutes)) return "Opening ranges must satisfy 0 < short < long";
+        if (s.RthOpenEt >= s.RthCloseEt) return "RthOpenEt must be before RthCloseEt";
+        return null;
+    }
+
     /// <summary>Parses "HH:mm,HH:mm". Blank input yields an empty list; any bad element fails the whole parse.</summary>
     public static bool TryParseTimeCsv(string? csv, out IReadOnlyList<TimeSpan> times)
     {

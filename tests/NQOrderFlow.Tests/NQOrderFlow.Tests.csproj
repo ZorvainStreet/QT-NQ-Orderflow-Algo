@@ -10,6 +10,9 @@
     <Compile Include="..\..\Config\**\*.cs" LinkBase="Core\Config" />
     <Compile Include="..\..\Compliance\**\*.cs" LinkBase="Core\Compliance" />
     <Compile Include="..\..\Persistence\**\*.cs" LinkBase="Core\Persistence" />
+    <Compile Include="..\..\Data\**\*.cs" LinkBase="Core\Data" />
+    <Compile Include="..\..\OrderFlow\**\*.cs" LinkBase="Core\OrderFlow" />
+    <Compile Include="..\..\Telemetry\**\*.cs" LinkBase="Core\Telemetry" />
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.*" />

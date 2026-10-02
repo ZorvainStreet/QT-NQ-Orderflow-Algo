@@ -105,4 +105,38 @@ public sealed class TickNormalizerTests
     [Fact]
     public void NonPositiveTickSize_Throws()
         => Assert.Throws<ArgumentOutOfRangeException>(() => new TickNormalizer(new DataSettings(), 0m));
+
+    [Fact]
+    public void ScatteredBadJumps_AllDropped()
+    {
+        var n = New();
+        n.OnTrade(Raw(0, 20000m));
+        Assert.Null(n.OnTrade(Raw(1, 20011m)));   // 44 ticks out, candidate=20011, _jumpDrops=1
+        Assert.Null(n.OnTrade(Raw(2, 20100m)));   // 400 ticks out, different from 20011, restart candidate=20100, _jumpDrops=1
+        Assert.Null(n.OnTrade(Raw(3, 19900m)));   // 400 ticks out, different from 20100, restart candidate=19900, _jumpDrops=1
+        Assert.Equal(3, n.Dropped);
+    }
+
+    [Fact]
+    public void JumpThenNormalThenJumpJump_LastStillDropped()
+    {
+        var n = New();
+        n.OnTrade(Raw(0, 20000m));
+        Assert.Null(n.OnTrade(Raw(1, 20011m)));        // jump, candidate=20011, _jumpDrops=1
+        Assert.NotNull(n.OnTrade(Raw(2, 20000m)));     // normal, clears candidate and _jumpDrops
+        Assert.Null(n.OnTrade(Raw(3, 20011m)));        // jump again, candidate=20011, _jumpDrops=1
+        Assert.Null(n.OnTrade(Raw(4, 20011m)));        // agrees with candidate, _jumpDrops=2, still < 3
+        Assert.Equal(3, n.Dropped);
+    }
+
+    [Fact]
+    public void QuoteChangeWithoutCorroboration_JumpStillDropped()
+    {
+        var n = New();
+        n.OnTrade(Raw(0, 20000m));
+        n.OnQuote(new RawQuote(T0.AddMilliseconds(1), 19999.75m, 20000m));
+        // Quote is at 19999.75/20000, but print at 20011 is far from both.
+        Assert.Null(n.OnTrade(Raw(2, 20011m)));        // 44 ticks from last, not corroborated by quote
+        Assert.Equal(1, n.Dropped);
+    }
 }

@@ -16,6 +16,7 @@ public sealed class TickNormalizer
     private bool _lastIsBuy = true;
     private RawTrade? _lastRaw;
     private int _jumpDrops;
+    private decimal? _jumpCandidate;
 
     public TickNormalizer(DataSettings settings, decimal tickSize)
     {
@@ -53,6 +54,7 @@ public sealed class TickNormalizer
         _lastRaw = raw;
         _quoteChangedSinceTrade = false;
         _jumpDrops = 0;
+        _jumpCandidate = null;
         Accepted++;
         if (fallback) Fallbacks++;
         return new Trade(raw.Utc, price, raw.Size, isBuy, fallback);
@@ -60,9 +62,36 @@ public sealed class TickNormalizer
 
     private bool IsUnconfirmedJump(decimal price)
     {
-        if (_lastPrice is not { } last || _quoteChangedSinceTrade) return false;
+        if (_lastPrice is not { } last) return false;
         if (Math.Abs(price - last) <= _s.BadTickMaxTicks * TickSize) return false;
-        _jumpDrops++;
+
+        // It's a jump. Check if quote corroborates it.
+        if (_quoteChangedSinceTrade && _quote is { } q)
+        {
+            var maxDistance = _s.BadTickMaxTicks * TickSize;
+            if (Math.Abs(price - q.Ask) <= maxDistance || Math.Abs(price - q.Bid) <= maxDistance)
+            {
+                return false;
+            }
+        }
+
+        // Jump needs confirmation. Track a candidate price.
+        if (_jumpCandidate is not { } candidate)
+        {
+            _jumpCandidate = price;
+            _jumpDrops = 1;
+        }
+        else if (Math.Abs(price - candidate) <= _s.BadTickMaxTicks * TickSize)
+        {
+            _jumpDrops++;
+        }
+        else
+        {
+            // Different jump price, restart.
+            _jumpCandidate = price;
+            _jumpDrops = 1;
+        }
+
         return _jumpDrops < _s.BadTickConfirmCount;
     }
 

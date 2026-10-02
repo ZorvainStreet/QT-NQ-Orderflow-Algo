@@ -26,6 +26,9 @@
 - DOM tracking is deferred (feature flag in Phase 4+).
 - Backfill starts at the prior trading session's start. Live ticks that arrive during backfill are buffered (max 200,000) and replayed only if newer than the last backfilled tick; on buffer overflow or backfill failure, warmup is never marked complete (data stays unhealthy until restart). Live quotes are ignored while backfilling.
 - `HistoryItemLast.TimeLeft` is treated as UTC, like `Last.Time`.
+- Bar close grace: the timer closes a 1m/5m bar only once `now - BarCloseGraceMs` (default 1500 ms) has passed the bar end, so trades stamped just before the boundary but delivered slightly late still land in the bar and in CVD/profile. Trades that still arrive after the bar closed are dropped from the bars and counted (`late_trades_1m`); `BucketSeries` also drops a trade older than its current bucket.
+- Future-skew guard: on the live path a print stamped more than `MaxFutureSkewSeconds` (default 5) ahead of wall-clock UTC is rejected before the normalizer and counted (`future_ticks`), so it cannot push the monotonic-time filter forward and lock out the feed. Health is also unhealthy if the last accepted tick is more than that far ahead of now. Backfill and replay use the unchecked path.
+- `BadTickConfirmCount` must be >= 2 (1 would disable the jump filter). Non-finite (NaN/Infinity) double inputs stop the strategy at start with the field name logged.
 
 ## Owner smoke test
 
@@ -44,3 +47,4 @@ Release build lands in `C:\Quantower\Settings\Scripts\Strategies\QT MNQ Orderflo
 - [ ] Compare `VWAP` and `dPOC/VAH/VAL` with Quantower's VWAP and Volume Profile indicators set to an RTH session. Expect a close match; value-area differences can come from the algorithm.
 - [ ] `fallback_pct` stays below 5% on Rithmic. If it is higher, the aggressor mapping is wrong.
 - [ ] Disconnect the network for 10 s. `data_healthy` goes to 0, then back to 1 when ticks resume.
+- [ ] `late_trades_1m` and `future_ticks` stay ~0 on the live feed.

@@ -23,7 +23,9 @@ public sealed record DataSettings(
     decimal ValueAreaPercent = 70m,
     int OpeningRangeShortMinutes = 5,
     int OpeningRangeLongMinutes = 15,
-    int MedianBarLookback = 30)
+    int MedianBarLookback = 30,
+    int MaxFutureSkewSeconds = 5,
+    int BarCloseGraceMs = 1500)
 {
     public TimeSpan RthOpenEt { get; init; } = new(9, 30, 0);
     public TimeSpan RthCloseEt { get; init; } = new(16, 0, 0);

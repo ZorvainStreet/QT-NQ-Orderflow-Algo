@@ -99,6 +99,8 @@ public sealed class NQOrderFlowStrategy : Strategy
     [InputParameter("Value area %", 450)] public double ValueAreaPercent = 70;
     [InputParameter("Opening range short (min)", 460, 0, 600, 1, 0)] public int OpeningRangeShortMinutes = 5;
     [InputParameter("Opening range long (min)", 462, 0, 600, 1, 0)] public int OpeningRangeLongMinutes = 15;
+    [InputParameter("Max future tick skew (s)", 412, 0, 3600, 1, 0)] public int MaxFutureSkewSeconds = 5;
+    [InputParameter("Bar close grace (ms)", 414, 0, 10000, 1, 0)] public int BarCloseGraceMs = 1500;
     [InputParameter("RTH open ET", 470)] public string RthOpenEt = "09:30";
     [InputParameter("RTH close ET", 472)] public string RthCloseEt = "16:00";
 
@@ -198,6 +200,12 @@ public sealed class NQOrderFlowStrategy : Strategy
             Stop();
             return;
         }
+        if (!TryCheckFiniteInputs(out var nonFinite))
+        {
+            Log($"Input '{nonFinite}' must be a finite number (NaN/Infinity rejected)", StrategyLoggingLevel.Error);
+            Stop();
+            return;
+        }
         if (!TryBuildSessionSettings(out var session, out var badField))
         {
             Log($"Invalid HH:mm in input '{badField}'", StrategyLoggingLevel.Error);
@@ -292,10 +300,10 @@ public sealed class NQOrderFlowStrategy : Strategy
         }
         catch (Exception ex)
         {
-            _logQueue.TryEnqueue($"{ErrorPrefix}Backfill FAILED: {ex.Message}. Data stays unhealthy (warmup incomplete).");
             lock (_feedGate)
             {
-                if (!ReferenceEquals(_pipeline, pipeline)) return;
+                if (!ReferenceEquals(_pipeline, pipeline)) return; // stale run: never log into the new run's queue
+                _logQueue.TryEnqueue($"{ErrorPrefix}Backfill FAILED: {ex.Message}. Data stays unhealthy (warmup incomplete).");
                 _backfilling = false; // live ticks flow again, but warmup is never marked complete (fail closed)
                 _liveBuffer.Clear();
             }
@@ -369,6 +377,8 @@ public sealed class NQOrderFlowStrategy : Strategy
         Gauge(meter, "session_cvd", () => _pipeline?.Snapshot(NowUtc()).SessionCvd);
         Gauge(meter, "vwap", () => _pipeline?.Levels().Vwap);
         Gauge(meter, "last_bar_delta", () => _pipeline?.Snapshot(NowUtc()).LastBarDelta);
+        Gauge(meter, "late_trades_1m", () => DataHealthNow()?.LateTrades1m);
+        Gauge(meter, "future_ticks", () => DataHealthNow()?.FutureTicks);
         Gauge(meter, "log_dropped", () => _logQueue.Dropped);
     }
 
@@ -410,7 +420,7 @@ public sealed class NQOrderFlowStrategy : Strategy
         lock (_feedGate)
         {
             if (_backfilling) { BufferLive(raw); return; }
-            closed = _pipeline?.OnTrade(raw);
+            closed = _pipeline?.OnTrade(raw, NowUtc());
         }
         if (closed is not null) EnqueueBarLog(closed);
     }, ref _tickErrors);
@@ -581,6 +591,48 @@ public sealed class NQOrderFlowStrategy : Strategy
         ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "NQ_OrderFlow", "state.json")
         : StatePath;
 
+    private bool TryCheckFiniteInputs(out string badField)
+    {
+        var values = new (string Name, double Value)[]
+        {
+            (nameof(InitialBalance), InitialBalance),
+            (nameof(MllDistanceUsd), MllDistanceUsd),
+            (nameof(MllLockFloorUsd), MllLockFloorUsd),
+            (nameof(ProfitTargetUsd), ProfitTargetUsd),
+            (nameof(TargetBufferUsd), TargetBufferUsd),
+            (nameof(ConsistencyCapPercent), ConsistencyCapPercent),
+            (nameof(ConsistencyEarlyStopPercent), ConsistencyEarlyStopPercent),
+            (nameof(TierAMinHeadroom), TierAMinHeadroom),
+            (nameof(TierBMinHeadroom), TierBMinHeadroom),
+            (nameof(MaxRiskTierA), MaxRiskTierA),
+            (nameof(MaxRiskTierB), MaxRiskTierB),
+            (nameof(MaxRiskTierC), MaxRiskTierC),
+            (nameof(MaxStopPointsTierC), MaxStopPointsTierC),
+            (nameof(MaxRiskPercentOfHeadroom), MaxRiskPercentOfHeadroom),
+            (nameof(HaltHeadroomUsd), HaltHeadroomUsd),
+            (nameof(MaxDailyLossUsd), MaxDailyLossUsd),
+            (nameof(DailyProfitCapUsd), DailyProfitCapUsd),
+            (nameof(GivebackArmUsd), GivebackArmUsd),
+            (nameof(GivebackPercent), GivebackPercent),
+            (nameof(CommissionPerSideUsd), CommissionPerSideUsd),
+            (nameof(SlippageUsd), SlippageUsd),
+            (nameof(MicroscalpWarnPercent), MicroscalpWarnPercent),
+            (nameof(MicroscalpHaltPercent), MicroscalpHaltPercent),
+            (nameof(FallbackWarnPercent), FallbackWarnPercent),
+            (nameof(ImbalanceRatio), ImbalanceRatio),
+            (nameof(ImbalanceMinVolume), ImbalanceMinVolume),
+            (nameof(AbsorptionVolMultiple), AbsorptionVolMultiple),
+            (nameof(AbsorptionDominancePercent), AbsorptionDominancePercent),
+            (nameof(DeltaFlipMinMultiple), DeltaFlipMinMultiple),
+            (nameof(VelocityZLimit), VelocityZLimit),
+            (nameof(ValueAreaPercent), ValueAreaPercent),
+        };
+        foreach (var (name, value) in values)
+            if (!double.IsFinite(value)) { badField = name; return false; }
+        badField = "";
+        return true;
+    }
+
     private bool TryBuildSessionSettings(out SessionSettings settings, out string badField)
     {
         settings = SessionSettings.Default();
@@ -649,7 +701,9 @@ public sealed class NQOrderFlowStrategy : Strategy
         ValueAreaPercent: (decimal)ValueAreaPercent,
         OpeningRangeShortMinutes: OpeningRangeShortMinutes,
         OpeningRangeLongMinutes: OpeningRangeLongMinutes,
-        MedianBarLookback: MedianBarLookback);
+        MedianBarLookback: MedianBarLookback,
+        MaxFutureSkewSeconds: MaxFutureSkewSeconds,
+        BarCloseGraceMs: BarCloseGraceMs);
 
     private AccountRules BuildAccountRules() => new()
     {

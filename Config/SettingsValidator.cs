@@ -29,7 +29,11 @@ public static class SettingsValidator
     /// <summary>Range and ordering checks for the Phase 2 data settings. Returns the first problem, or null.</summary>
     public static string? Validate(DataSettings s)
     {
-        if (s.BadTickMaxTicks < 1 || s.BadTickConfirmCount < 1) return "Bad-tick settings must be >= 1";
+        if (s.BadTickMaxTicks < 1) return "BadTickMaxTicks must be >= 1";
+        if (s.BadTickConfirmCount < 2) return "BadTickConfirmCount must be >= 2 (1 disables the jump filter)";
+        if (s.MaxFutureSkewSeconds < 1) return "MaxFutureSkewSeconds must be >= 1";
+        if (s.BarCloseGraceMs is < 0 or > 10000) return "BarCloseGraceMs must be in 0..10000";
+        if (!double.IsFinite(s.FallbackWarnPercent) || !double.IsFinite(s.VelocityZLimit)) return "FallbackWarnPercent and VelocityZLimit must be finite numbers";
         if (s.MaxTickAgeSeconds < 1 || s.BarHistoryCapacity < 20) return "MaxTickAgeSeconds >= 1 and BarHistoryCapacity >= 20 required";
         if (s.ImbalanceRatio < 1m || s.ImbalanceMinVolume < 0m || s.StackedLevels < 1) return "Imbalance settings out of range";
         if (!(0 < s.TapeShortSeconds && s.TapeShortSeconds < s.TapeMidSeconds && s.TapeMidSeconds < s.TapeLongSeconds))

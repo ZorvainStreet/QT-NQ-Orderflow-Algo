@@ -98,4 +98,11 @@ public sealed class OrderFlowFeaturesTests
         var trades = new[] { new Trade(T0, 100m, 15m, false, false), new Trade(T0.AddSeconds(5), 99m, 10m, false, false) };
         Assert.False(OrderFlowFeatures.Absorption(trades, 10m, 100m, bullish: true, S, 0.25m).Detected);   // 4 ticks through
     }
+
+    [Fact]
+    public void Absorption_ZeroSizeTrades_ReturnsNone()
+    {
+        var trades = new[] { new Trade(T0, 100m, 0m, false, false), new Trade(T0.AddSeconds(1), 100m, 0m, true, false) };
+        Assert.Equal(AbsorptionResult.None, OrderFlowFeatures.Absorption(trades, 10m, 100m, bullish: true, S, 0.25m));
+    }
 }

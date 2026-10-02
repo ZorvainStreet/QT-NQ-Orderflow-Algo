@@ -57,7 +57,7 @@ public sealed class MarketDataPipelineTests
     {
         var p = New();
         p.OnTrade(Raw(5, 100m));
-        Assert.NotNull(p.OnTimer(T0.AddSeconds(61)));
+        Assert.NotNull(p.OnTimer(T0.AddSeconds(62)));
     }
 
     [Fact]
@@ -67,5 +67,69 @@ public sealed class MarketDataPipelineTests
         p.OnTrade(Raw(10, 100m, 4));
         p.OnTrade(Raw(9, 100m, 4));                                 // older replay → dropped
         Assert.Equal(4m, p.Snapshot(T0.AddSeconds(10)).SessionCvd);
+    }
+
+    [Fact]
+    public void FutureDatedTick_IsRejectedCounted_AndLaterNormalTickAccepted()
+    {
+        var p = New();
+        var now = T0.AddSeconds(1);
+        Assert.Null(p.OnTrade(Raw(11, 100m), now));                 // 10 s ahead of now
+        Assert.Equal(1, p.Health(now).FutureTicks);
+        Assert.Null(p.LastTradeUtc);
+        p.OnTrade(Raw(1, 100m), now);
+        Assert.Equal(T0.AddSeconds(1), p.LastTradeUtc);
+        Assert.Equal(1m, p.Snapshot(now).SessionCvd);
+        Assert.Equal(1, p.Health(now).FutureTicks);
+    }
+
+    [Fact]
+    public void TickWithinFutureSkew_IsAccepted()
+    {
+        var p = New();
+        p.OnTrade(Raw(5, 100m), T0);                                // exactly +5 s: allowed
+        Assert.Equal(0, p.Health(T0).FutureTicks);
+        Assert.NotNull(p.LastTradeUtc);
+    }
+
+    [Fact]
+    public void Health_UnhealthyWhenLastTickMoreThanSkewAheadOfNow()
+    {
+        var p = New();
+        p.OnTrade(Raw(10, 100m));                                   // legacy path accepts it
+        p.MarkWarmupComplete();
+        Assert.False(p.Health(T0.AddSeconds(4)).IsHealthy);         // 6 s ahead
+        Assert.True(p.Health(T0.AddSeconds(6)).IsHealthy);          // 4 s ahead: within skew
+    }
+
+    [Fact]
+    public void OnTimer_HonoursBarCloseGrace()
+    {
+        var p = New();
+        p.OnTrade(Raw(5, 100m));
+        Assert.Null(p.OnTimer(T0.AddSeconds(61)));                  // barEnd + 1 s < grace 1.5 s
+        Assert.NotNull(p.OnTimer(T0.AddSeconds(62)));               // barEnd + 2 s
+    }
+
+    [Fact]
+    public void TradeBeforeBarEnd_ArrivingWithinGrace_LandsInBar()
+    {
+        var p = New();
+        p.OnTrade(Raw(5, 100m));
+        Assert.Null(p.OnTimer(T0.AddSeconds(61)));
+        p.OnTrade(Raw(59.5, 100m, 2), T0.AddSeconds(61));
+        var closed = p.OnTimer(T0.AddSeconds(62));
+        Assert.Equal(3m, closed!.Delta);
+        Assert.Equal(0, p.Health(T0.AddSeconds(62)).LateTrades1m);
+    }
+
+    [Fact]
+    public void TradeAfterBarClosed_IsCountedLate()
+    {
+        var p = New();
+        p.OnTrade(Raw(5, 100m));
+        p.OnTimer(T0.AddSeconds(62));
+        p.OnTrade(Raw(59.9, 100m));
+        Assert.Equal(1, p.Health(T0.AddSeconds(62)).LateTrades1m);
     }
 }

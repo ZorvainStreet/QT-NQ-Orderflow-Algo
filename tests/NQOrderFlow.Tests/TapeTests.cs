@@ -49,4 +49,15 @@ public sealed class TapeTests
         b.AdvanceTo(T0.AddSeconds(25));
         Assert.Single(b.Closed);
     }
+
+    [Fact]
+    public void BucketSeries_DropsTradeOlderThanCurrentBucket()
+    {
+        var b = new BucketSeries(TimeSpan.FromSeconds(20), 10);
+        b.Add(new Trade(T0.AddSeconds(25), 100m, 2m, true, false));      // bucket 20..40
+        b.Add(new Trade(T0.AddSeconds(5), 100m, 7m, true, false));       // stale: bucket 0..20
+        b.AdvanceTo(T0.AddSeconds(40));
+        Assert.Equal(2m, b.Closed[^1].Volume);
+        Assert.Equal(1, b.Closed[^1].Trades);
+    }
 }

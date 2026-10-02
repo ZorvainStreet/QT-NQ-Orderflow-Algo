@@ -121,6 +121,14 @@ public sealed class SettingsValidatorTests
         new object[] { new DataSettings(ValueAreaPercent: 0m) },
         new object[] { new DataSettings(AbsorptionDominancePercent: 101m) },
         new object[] { new DataSettings(BaselineMinutes: 0) },
+        new object[] { new DataSettings(BadTickConfirmCount: 1) },
+        new object[] { new DataSettings(MaxFutureSkewSeconds: 0) },
+        new object[] { new DataSettings(BarCloseGraceMs: -1) },
+        new object[] { new DataSettings(BarCloseGraceMs: 10001) },
+        new object[] { new DataSettings(FallbackWarnPercent: double.NaN) },
+        new object[] { new DataSettings(FallbackWarnPercent: double.PositiveInfinity) },
+        new object[] { new DataSettings(VelocityZLimit: double.NaN) },
+        new object[] { new DataSettings(VelocityZLimit: double.PositiveInfinity) },
         new object[] { new DataSettings() with { RthOpenEt = new(16, 0, 0) } },
     };
 }

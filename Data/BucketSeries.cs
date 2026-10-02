@@ -25,6 +25,7 @@ public sealed class BucketSeries
 
     public void Add(Trade t)
     {
+        if (_start is { } current && t.Utc < current) return; // stale: never book into the current bucket
         AdvanceTo(t.Utc);
         _volume += t.Size;
         _delta += t.IsBuy ? t.Size : -t.Size;

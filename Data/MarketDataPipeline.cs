@@ -6,7 +6,8 @@ namespace QT_MNQ_Orderflow_Algo.Data;
 
 public sealed record DataHealth(
     bool WarmupComplete, double LastTickAgeSeconds, double FallbackPercent,
-    long Accepted, long Dropped, bool FallbackWarning, bool IsHealthy);
+    long Accepted, long Dropped, bool FallbackWarning, bool IsHealthy,
+    long FutureTicks, long LateTrades1m, long LateTrades5m);
 
 /// <summary>
 /// Single owner of all market-data accumulators. Every public member takes one lock; callers get snapshots only.
@@ -27,6 +28,7 @@ public sealed class MarketDataPipeline
     private DateTime? _lastTradeUtc;
     private decimal? _lastPrice;
     private bool _warm;
+    private long _futureTicks;
 
     public MarketDataPipeline(DataSettings settings, SessionClock clock, decimal tickSize)
     {
@@ -47,10 +49,21 @@ public sealed class MarketDataPipeline
 
     public void OnQuote(RawQuote q) { lock (_gate) _normalizer.OnQuote(q); }
 
-    public FootprintBar? OnTrade(RawTrade raw)
+    /// <summary>Unchecked path for backfill and replay: no wall-clock comparison.</summary>
+    public FootprintBar? OnTrade(RawTrade raw) => Ingest(raw, null);
+
+    /// <summary>Live path: a print more than MaxFutureSkewSeconds ahead of <paramref name="nowUtc"/> is rejected and counted.</summary>
+    public FootprintBar? OnTrade(RawTrade raw, DateTime nowUtc) => Ingest(raw, nowUtc);
+
+    private FootprintBar? Ingest(RawTrade raw, DateTime? nowUtc)
     {
         lock (_gate)
         {
+            if (nowUtc is { } now && raw.Utc > now + TimeSpan.FromSeconds(_s.MaxFutureSkewSeconds))
+            {
+                _futureTicks++;
+                return null;
+            }
             if (_normalizer.OnTrade(raw) is not { } t) return null;
             var tradingDate = _clock.TradingDate(t.Utc);
             if (_cvdDate != tradingDate) { _cvdDate = tradingDate; _sessionCvd = 0m; }
@@ -71,12 +84,13 @@ public sealed class MarketDataPipeline
     {
         lock (_gate)
         {
-            _bars5m.CloseIfElapsed(nowUtc);
-            _buckets.AdvanceTo(nowUtc);
+            var graced = nowUtc - TimeSpan.FromMilliseconds(_s.BarCloseGraceMs);
+            _bars5m.CloseIfElapsed(graced);
+            _buckets.AdvanceTo(graced);
             _tapeShort.Trim(nowUtc);
             _tapeMid.Trim(nowUtc);
             _tapeLong.Trim(nowUtc);
-            return _bars1m.CloseIfElapsed(nowUtc);
+            return _bars1m.CloseIfElapsed(graced);
         }
     }
 
@@ -104,7 +118,8 @@ public sealed class MarketDataPipeline
             var age = _lastTradeUtc is { } last ? (nowUtc - last).TotalSeconds : double.PositiveInfinity;
             var fallbackWarning = _normalizer.FallbackPercent > _s.FallbackWarnPercent;
             return new DataHealth(_warm, age, _normalizer.FallbackPercent, _normalizer.Accepted, _normalizer.Dropped,
-                fallbackWarning, _warm && age <= _s.MaxTickAgeSeconds);
+                fallbackWarning, _warm && age <= _s.MaxTickAgeSeconds && age >= -_s.MaxFutureSkewSeconds,
+                _futureTicks, _bars1m.LateTrades, _bars5m.LateTrades);
         }
     }
 

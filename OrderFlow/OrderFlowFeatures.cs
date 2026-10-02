@@ -70,6 +70,7 @@ public static class OrderFlowFeatures
         if (midWindow.Count == 0 || medianBucketVolume <= 0) return AbsorptionResult.None;
         var buy = midWindow.Where(t => t.IsBuy).Sum(t => t.Size);
         var sell = midWindow.Where(t => !t.IsBuy).Sum(t => t.Size);
+        if (buy + sell <= 0m) return AbsorptionResult.None;
         var aggressive = bullish ? sell : buy;
         var dominance = aggressive / (buy + sell) * 100m;
         var tolerance = s.AbsorptionMaxProgressTicks * tickSize;

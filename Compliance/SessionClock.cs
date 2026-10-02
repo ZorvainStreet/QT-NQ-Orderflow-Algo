@@ -23,6 +23,18 @@ public sealed class SessionClock
         return et.TimeOfDay >= Settings.TradingDayRollEt ? d.AddDays(1) : d;
     }
 
+    /// <summary>Previous weekday trading date. Exchange holidays are not modeled (see docs/ASSUMPTIONS.md).</summary>
+    public DateOnly PreviousTradingDate(DateOnly tradingDate)
+    {
+        var d = tradingDate.AddDays(-1);
+        while (d.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday) d = d.AddDays(-1);
+        return d;
+    }
+
+    /// <summary>UTC start of a trading date's session: the previous calendar day at the roll time, ET.</summary>
+    public DateTime SessionStartUtc(DateOnly tradingDate) =>
+        EtToUtc(tradingDate.AddDays(-1).ToDateTime(TimeOnly.FromTimeSpan(Settings.TradingDayRollEt)));
+
     public bool IsEntryWeekday(DateTime utc) => IsEntryDay(ToEt(utc).DayOfWeek);
 
     public SessionWindow? ActiveWindow(DateTime utc)

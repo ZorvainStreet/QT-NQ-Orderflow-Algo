@@ -65,4 +65,18 @@ public sealed class SessionClockTests
         Assert.Equal("NY_AM_KILLZONE", next?.Window.Name);
         Assert.Equal(Utc(2026, 11, 2, 14, 35), next?.OpensUtc);
     }
+
+    [Fact]
+    public void PreviousTradingDate_SkipsWeekend()
+    {
+        Assert.Equal(new DateOnly(2026, 10, 30), _clock.PreviousTradingDate(new DateOnly(2026, 11, 2)));
+        Assert.Equal(new DateOnly(2026, 10, 28), _clock.PreviousTradingDate(new DateOnly(2026, 10, 29)));
+    }
+
+    [Fact]
+    public void SessionStartUtc_IsPreviousDay1800Et_DstAware()
+    {
+        Assert.Equal(Utc(2026, 10, 28, 22, 0), _clock.SessionStartUtc(new DateOnly(2026, 10, 29)));  // EDT
+        Assert.Equal(Utc(2026, 11, 1, 23, 0), _clock.SessionStartUtc(new DateOnly(2026, 11, 2)));    // Sun 18:00 EST
+    }
 }

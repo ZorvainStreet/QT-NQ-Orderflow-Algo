@@ -79,4 +79,25 @@ public sealed class FootprintBarTests
         Assert.True(bar.UnfinishedHigh);    // 100: both sides traded
         Assert.False(bar.UnfinishedLow);    // 99: only ask
     }
+
+    [Fact]
+    public void BuyImbalance_WithMinVolumeZero_RequiresAskGtZero()
+    {
+        var bar = Bar(S(100m, 10));  // Only ask at 100, no bid
+        Assert.Empty(bar.BuyImbalances(1.0m, 0m));  // Should be empty because ask > 0 check prevents it
+    }
+
+    [Fact]
+    public void LongestStack_WithDuplicates_IgnoresDuplicates()
+    {
+        // [100, 100.25, 100.25, 100.5] → distinct [100, 100.25, 100.5] → consecutive run of 3
+        Assert.Equal(3, FootprintBar.LongestStack(new[] { 100m, 100.25m, 100.25m, 100.5m }, 0.25m));
+    }
+
+    [Fact]
+    public void Constructor_ThrowsOnInvalidTickSize()
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() => new FootprintBar(T0, 0m));
+        Assert.Throws<ArgumentOutOfRangeException>(() => new FootprintBar(T0, -0.25m));
+    }
 }

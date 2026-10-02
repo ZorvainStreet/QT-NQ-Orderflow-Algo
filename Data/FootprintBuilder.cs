@@ -7,10 +7,12 @@ public sealed class FootprintBuilder
     private readonly decimal _tickSize;
     private readonly int _capacity;
     private readonly List<FootprintBar> _closed = new();
+    private DateTime? _lastClosedStart;
 
     public FootprintBuilder(TimeSpan period, decimal tickSize, int capacity)
     {
         if (period <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(period));
+        if (tickSize <= 0) throw new ArgumentOutOfRangeException(nameof(tickSize));
         if (capacity < 1) throw new ArgumentOutOfRangeException(nameof(capacity));
         _period = period;
         _tickSize = tickSize;
@@ -19,6 +21,7 @@ public sealed class FootprintBuilder
 
     public FootprintBar? Current { get; private set; }
     public IReadOnlyList<FootprintBar> Closed => _closed.ToArray();
+    public long LateTrades { get; private set; }
 
     public static DateTime BucketStart(DateTime utc, TimeSpan period) =>
         new(utc.Ticks - utc.Ticks % period.Ticks, DateTimeKind.Utc);
@@ -26,6 +29,19 @@ public sealed class FootprintBuilder
     public FootprintBar? OnTrade(Trade t)
     {
         var start = BucketStart(t.Utc, _period);
+
+        // Reject if trade is from a bucket already closed, or older than current bar
+        if (_lastClosedStart.HasValue && start <= _lastClosedStart)
+        {
+            LateTrades++;
+            return null;
+        }
+        if (Current is not null && start < Current.StartUtc)
+        {
+            LateTrades++;
+            return null;
+        }
+
         FootprintBar? closed = null;
         if (Current is not null && start != Current.StartUtc) closed = CloseCurrent();
         Current ??= new FootprintBar(start, _tickSize);
@@ -39,6 +55,7 @@ public sealed class FootprintBuilder
     private FootprintBar CloseCurrent()
     {
         var bar = Current!;
+        _lastClosedStart = bar.StartUtc;
         _closed.Add(bar);
         if (_closed.Count > _capacity) _closed.RemoveAt(0);
         Current = null;

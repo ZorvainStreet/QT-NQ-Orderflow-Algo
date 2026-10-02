@@ -15,6 +15,7 @@ public sealed class FootprintBar
 
     public FootprintBar(DateTime startUtc, decimal tickSize)
     {
+        if (tickSize <= 0) throw new ArgumentOutOfRangeException(nameof(tickSize));
         StartUtc = startUtc;
         TickSize = tickSize;
     }
@@ -65,17 +66,18 @@ public sealed class FootprintBar
     }
 
     public IReadOnlyList<decimal> BuyImbalances(decimal ratio, decimal minVolume) =>
-        _levels.Where(kv => kv.Value.Ask >= minVolume && kv.Value.Ask >= ratio * BidAt(kv.Key - TickSize))
+        _levels.Where(kv => kv.Value.Ask > 0 && kv.Value.Ask >= minVolume && kv.Value.Ask >= ratio * BidAt(kv.Key - TickSize))
                .Select(kv => kv.Key).ToList();
 
     public IReadOnlyList<decimal> SellImbalances(decimal ratio, decimal minVolume) =>
-        _levels.Where(kv => kv.Value.Bid >= minVolume && kv.Value.Bid >= ratio * AskAt(kv.Key + TickSize))
+        _levels.Where(kv => kv.Value.Bid > 0 && kv.Value.Bid >= minVolume && kv.Value.Bid >= ratio * AskAt(kv.Key + TickSize))
                .Select(kv => kv.Key).ToList();
 
     public static int LongestStack(IReadOnlyList<decimal> prices, decimal tickSize)
     {
         if (prices.Count == 0) return 0;
-        var sorted = prices.OrderBy(p => p).ToArray();
+        var sorted = prices.Distinct().OrderBy(p => p).ToArray();
+        if (sorted.Length == 0) return 0;
         int best = 1, run = 1;
         for (int i = 1; i < sorted.Length; i++)
         {

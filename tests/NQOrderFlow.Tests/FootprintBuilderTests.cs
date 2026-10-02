@@ -48,4 +48,40 @@ public sealed class FootprintBuilderTests
         for (int m = 0; m <= 3; m++) b.OnTrade(At(m * 60));
         Assert.Equal(new[] { T0.AddMinutes(1), T0.AddMinutes(2) }, b.Closed.Select(x => x.StartUtc));
     }
+
+    [Fact]
+    public void LateTrade_AfterCloseAndTimeAdvance_RejectedAndCounted()
+    {
+        // Test (a): trade at 10s, close at 60s, then trade at 59.9s
+        var b = new FootprintBuilder(TimeSpan.FromMinutes(1), 0.25m, 10);
+        b.OnTrade(At(10));
+        b.CloseIfElapsed(T0.AddSeconds(60));
+        var late = b.OnTrade(At(59.9));  // Trade from same original period
+        Assert.Null(late);
+        Assert.Null(b.Current);
+        Assert.Equal(1, b.LateTrades);
+        Assert.Single(b.Closed);
+    }
+
+    [Fact]
+    public void LateTrade_FromOldBucket_RejectedAndCounted()
+    {
+        // Test (b): Current at minute 2, then trade from minute 1
+        var b = new FootprintBuilder(TimeSpan.FromMinutes(1), 0.25m, 10);
+        b.OnTrade(At(120));  // Minute 2
+        var late = b.OnTrade(At(60));  // Minute 1 (older)
+        Assert.Null(late);
+        Assert.NotNull(b.Current);
+        Assert.Equal(T0.AddMinutes(2), b.Current!.StartUtc);
+        Assert.Equal(1, b.LateTrades);
+    }
+
+    [Fact]
+    public void Constructor_ThrowsOnInvalidTickSize()
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            new FootprintBuilder(TimeSpan.FromMinutes(1), 0m, 10));
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            new FootprintBuilder(TimeSpan.FromMinutes(1), -0.25m, 10));
+    }
 }
